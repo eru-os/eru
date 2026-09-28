@@ -1,0 +1,76 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>{{.Branding.AppName}}</title>
+<style>
+:root {
+  --eru-accent: {{.AccentColor}};
+  --eru-bg: {{.BackgroundColor}};
+  --eru-surface: #ffffff;
+  --eru-text: #1a1d21;
+  --eru-muted: #5f6672;
+  --eru-border: #e2e5ea;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --eru-surface: #1c1f24; --eru-text: #eef0f3; --eru-muted: #a2a9b5; --eru-border: #333841;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  padding: 24px 16px; background: var(--eru-bg); color: var(--eru-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+}
+.card {
+  width: 100%; max-width: 380px; background: var(--eru-surface); border: 1px solid var(--eru-border);
+  border-radius: 12px; padding: 32px 28px; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.brand { text-align: center; margin-bottom: 24px; }
+.brand img { max-height: 40px; max-width: 180px; }
+.brand h1 { font-size: 1.15rem; font-weight: 600; margin: 8px 0 0; }
+p.lead { color: var(--eru-muted); font-size: .9rem; margin: 0 0 20px; text-align: center; }
+label { display: block; font-size: .82rem; font-weight: 600; margin-bottom: 6px; }
+input[type=text], input[type=password] {
+  width: 100%; padding: 10px 12px; margin-bottom: 16px; font-size: .95rem;
+  border: 1px solid var(--eru-border); border-radius: 8px;
+  background: var(--eru-surface); color: var(--eru-text);
+}
+input:focus { outline: 2px solid var(--eru-accent); outline-offset: 1px; }
+button {
+  width: 100%; padding: 11px 14px; font-size: .95rem; font-weight: 600; cursor: pointer;
+  border: 1px solid transparent; border-radius: 8px; background: var(--eru-accent); color: #fff;
+}
+button.secondary { background: transparent; color: var(--eru-muted); border-color: var(--eru-border); margin-top: 10px; }
+.scopes { list-style: none; padding: 0; margin: 0 0 20px; }
+.scopes li { padding: 9px 12px; border: 1px solid var(--eru-border); border-radius: 8px; margin-bottom: 8px; font-size: .88rem; }
+.scopes code { font-size: .8rem; color: var(--eru-muted); }
+.error { background: #fdecea; color: #a4262c; border: 1px solid #f5c2c0; border-radius: 8px; padding: 10px 12px; font-size: .85rem; margin-bottom: 16px; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .error { background: #3a1d1f; color: #ff9c9c; border-color: #5c2b2e; } }
+.footer { margin-top: 20px; text-align: center; font-size: .78rem; color: var(--eru-muted); }
+.footer a { color: var(--eru-muted); margin: 0 6px; }
+</style>
+{{if .Branding.StylesheetUrl}}<link rel="stylesheet" href="{{.Branding.StylesheetUrl}}">{{end}}
+</head>
+<body>
+<main class="card">
+  <div class="brand">
+    {{if .Branding.LogoUrl}}<img src="{{.Branding.LogoUrl}}" alt="">{{end}}
+    <h1>{{.Branding.AppName}}</h1>
+  </div>
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+  {{template "content" .}}
+  {{if or .Branding.PrivacyUrl .Branding.TermsUrl .Branding.SupportUrl}}
+  <div class="footer">
+    {{if .Branding.PrivacyUrl}}<a href="{{.Branding.PrivacyUrl}}">Privacy</a>{{end}}
+    {{if .Branding.TermsUrl}}<a href="{{.Branding.TermsUrl}}">Terms</a>{{end}}
+    {{if .Branding.SupportUrl}}<a href="{{.Branding.SupportUrl}}">Support</a>{{end}}
+  </div>
+  {{end}}
+</main>
+</body>
+</html>{{end}}

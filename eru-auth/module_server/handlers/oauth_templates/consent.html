@@ -1,0 +1,14 @@
+{{define "content"}}
+<p class="lead">{{if .ClientName}}{{.ClientName}}{{else}}An application{{end}} wants access to your account</p>
+{{if .Scopes}}
+<ul class="scopes">
+  {{range .Scopes}}<li>{{.Description}}<br><code>{{.Name}}</code></li>{{end}}
+</ul>
+{{end}}
+<form method="post" action="{{.FormAction}}">
+  <input type="hidden" name="consent_challenge" value="{{.Challenge}}">
+  <input type="hidden" name="csrf_token" value="{{.CsrfToken}}">
+  <button type="submit" name="decision" value="accept">Allow</button>
+  <button type="submit" name="decision" value="reject" class="secondary">Deny</button>
+</form>
+{{end}}

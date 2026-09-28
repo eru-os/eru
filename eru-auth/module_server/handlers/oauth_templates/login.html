@@ -1,0 +1,12 @@
+{{define "content"}}
+<p class="lead">Sign in to continue{{if .ClientName}} to {{.ClientName}}{{end}}</p>
+<form method="post" action="{{.FormAction}}" autocomplete="on">
+  <input type="hidden" name="login_challenge" value="{{.Challenge}}">
+  <input type="hidden" name="csrf_token" value="{{.CsrfToken}}">
+  <label for="username">Username</label>
+  <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button type="submit">Sign in</button>
+</form>
+{{end}}

@@ -1,0 +1,29 @@
+go 1.24.0
+
+use (
+	./eru-ai
+	./eru-auth
+	./eru-cache
+	./eru-crypto
+	./eru-db
+	./eru-embeddings
+	./eru-events
+	./eru-files
+	./eru-functions
+	./eru-gateway
+	./eru-html-image
+	./eru-logs
+	./eru-models
+	./eru-ql
+	./eru-read-write
+	./eru-repos
+	./eru-rules
+	./eru-scheduler
+	./eru-secret-manager
+	./eru-security-rule
+	./eru-server
+	./eru-store
+	./eru-templates
+	./eru-utils
+	./eru-vectorstore
+)
