@@ -8,6 +8,7 @@ import (
 
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
 	common_types "github.com/eru-os/eru/eru-ql/common_types"
+  "github.com/eru-os/eru/eru-ql/derived"
 	"github.com/eru-os/eru/eru-ql/module_model"
 )
 
@@ -166,4 +167,8 @@ var icebergErutoDBDataTypeMapping = map[string]string{
 	"Struct":       "STRUCT",
 	"Binary":       "BINARY",
 	"UUID":         "UUID",
+}
+
+func (ib *IcebergSqlMaker) GetCalcDialect(ctx context.Context) derived.Dialect {
+	return derived.IcebergDialect()
 }

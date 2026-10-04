@@ -32,7 +32,7 @@ const (
 
 type FirebaseAccount struct {
 	ProjectId      string `json:"project_id" eru:"required" desc:"Firebase project id"`
-	ServiceAccount string `json:"service_account" eru:"required" desc:"Firebase service account"`
+	ServiceAccount string `json:"service_account" secret:"true" eru:"required" desc:"Firebase service account"`
 }
 
 type FirebaseTool struct {

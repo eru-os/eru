@@ -2,10 +2,14 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
 )
@@ -47,11 +51,36 @@ type OAuthServerConfig struct {
 
 	// Only used when Backend is ERU - a token backend issues its own tokens with its own configuration.
 	SigningKid           string   `json:"signing_kid"`
+	FirstPartyClientId   string   `json:"first_party_client_id"`
 	AccessTokenAudience  []string `json:"access_token_audience"`
-	AccessTokenLifespan  int      `json:"access_token_lifespan_seconds"`
-	IdTokenLifespan      int      `json:"id_token_lifespan_seconds"`
-	RefreshTokenLifespan int      `json:"refresh_token_lifespan_seconds"`
-	SessionLifespan      int      `json:"session_lifespan_seconds"`
+	AccessTokenLifespan  Lifespan `json:"access_token_lifespan_seconds"`
+	IdTokenLifespan      Lifespan `json:"id_token_lifespan_seconds"`
+	RefreshTokenLifespan Lifespan `json:"refresh_token_lifespan_seconds"`
+	SessionLifespan      Lifespan `json:"session_lifespan_seconds"`
+
+	// RefreshCookie moves the refresh token out of the login response body and into a cookie the
+	// browser cannot read. Off by default, so an existing caller keeps getting it in the body.
+	RefreshCookie RefreshCookieConfig `json:"refresh_cookie"`
+}
+
+// RefreshCookieConfig controls the http only refresh cookie issued to a first party browser. The
+// refresh token is the long lived credential, so keeping it out of javascript is what stops an xss
+// bug from turning into a lasting account takeover.
+type RefreshCookieConfig struct {
+	Enabled bool `json:"enabled"`
+	// Domain should be the parent the api subdomains share, e.g. "dev.example.com", so one
+	// cookie reaches every service of that project. A leading dot is accepted but dropped when the
+	// header is written - RFC 6265 treats a bare domain as already covering its subdomains. Left
+	// empty the cookie is host only.
+	Domain string `json:"domain"`
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	// SameSite defaults to Lax, which keeps the cookie off cross site posts - that is what protects
+	// the refresh endpoint from being driven by another origin.
+	SameSite string `json:"same_site"`
+	// OmitFromBody stops returning the refresh token in the json as well. Turn it on only once every
+	// caller of this auth reads the cookie, since it is a breaking change for the others.
+	OmitFromBody bool `json:"omit_from_body"`
 }
 
 // OAuthServerUi points the login and consent steps at an app of your own. Leave LoginUrl empty and
@@ -145,6 +174,90 @@ type OAuthServerMetadata struct {
 	IdTokenSigningAlgValuesSupported  []string `json:"id_token_signing_alg_values_supported"`
 }
 
+// Lifespan is a duration held in seconds. It accepts a plain number of seconds, and also a duration
+// string like "60m" or "30d", because that is how the rest of eru writes lifespans - and a bare
+// number invites the wrong unit.
+//
+// Days are handled here: time.ParseDuration has no "d", so "30d" would otherwise be rejected.
+type Lifespan int
+
+func (lifespan Lifespan) Seconds() int { return int(lifespan) }
+
+func (lifespan *Lifespan) UnmarshalJSON(b []byte) error {
+	var asSeconds int
+	if err := json.Unmarshal(b, &asSeconds); err == nil {
+		*lifespan = Lifespan(asSeconds)
+		return nil
+	}
+
+	var asDuration string
+	if err := json.Unmarshal(b, &asDuration); err != nil {
+		return fmt.Errorf("a lifespan must be a number of seconds or a duration such as \"60m\"")
+	}
+	asDuration = strings.TrimSpace(asDuration)
+	if asDuration == "" {
+		*lifespan = 0
+		return nil
+	}
+
+	seconds, err := parseLifespan(asDuration)
+	if err != nil {
+		return err
+	}
+	*lifespan = Lifespan(seconds)
+	return nil
+}
+
+// MarshalJSON writes seconds, so a value read back from the store is unambiguous whichever form it
+// was written in.
+func (lifespan Lifespan) MarshalJSON() ([]byte, error) {
+	return json.Marshal(int(lifespan))
+}
+
+func parseLifespan(value string) (int, error) {
+	// "30d" and the like, which time.ParseDuration does not know.
+	if days, found := strings.CutSuffix(strings.ToLower(value), "d"); found {
+		dayCount, err := strconv.Atoi(strings.TrimSpace(days))
+		if err == nil {
+			return dayCount * 24 * 3600, nil
+		}
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a valid lifespan - use seconds or a duration such as \"60m\", \"1h\" or \"30d\"", value)
+	}
+	return int(duration.Seconds()), nil
+}
+
+const defaultRefreshCookieName = "eru_refresh"
+
+func (cookie RefreshCookieConfig) CookieName() string {
+	if cookie.Name != "" {
+		return cookie.Name
+	}
+	return defaultRefreshCookieName
+}
+
+func (cookie RefreshCookieConfig) CookiePath() string {
+	if cookie.Path != "" {
+		return cookie.Path
+	}
+	return "/"
+}
+
+// SameSiteMode maps the configured value, defaulting to Lax. None is only meaningful on a secure
+// cookie and is what a cross site caller would need, so it has to be asked for explicitly.
+func (cookie RefreshCookieConfig) SameSiteMode() http.SameSite {
+	switch strings.ToUpper(cookie.SameSite) {
+	case "STRICT":
+		return http.SameSiteStrictMode
+	case "NONE":
+		return http.SameSiteNoneMode
+	default:
+		return http.SameSiteLaxMode
+	}
+}
+
 func (oAuthServerConfig OAuthServerConfig) IsExternalUi() bool {
 	return oAuthServerConfig.Ui.LoginUrl != ""
 }
@@ -233,13 +346,13 @@ func (auth *Auth) AuthorizationServerMetadata(ctx context.Context) (OAuthServerM
 		EndSessionEndpoint:                fmt.Sprint(grantBase, OAuthLogoutPath),
 		ScopesSupported:                   auth.OAuthServerConfig.Scopes(),
 		ResponseTypesSupported:            defaultOAuthResponseTypes,
-		GrantTypesSupported:               auth.OAuthServerConfig.ClientPolicy.GrantTypes(),
-		TokenEndpointAuthMethodsSupported: auth.OAuthServerConfig.ClientPolicy.AuthMethods(),
+		GrantTypesSupported:               auth.OAuthServerConfig.EffectiveClientPolicy().GrantTypes(),
+		TokenEndpointAuthMethodsSupported: auth.OAuthServerConfig.EffectiveClientPolicy().AuthMethods(),
 		CodeChallengeMethodsSupported:     []string{"S256"},
 		SubjectTypesSupported:             []string{"public"},
 		IdTokenSigningAlgValuesSupported:  []string{"RS256"},
 	}
-	if auth.OAuthServerConfig.ClientPolicy.AllowDynamicRegistration {
+	if auth.OAuthServerConfig.EffectiveClientPolicy().AllowDynamicRegistration {
 		metadata.RegistrationEndpoint = fmt.Sprint(issuer, OAuthRegisterPath)
 	}
 	return metadata, nil
@@ -257,6 +370,18 @@ func (policy OAuthClientPolicy) AuthMethods() []string {
 		return []string{"none"}
 	}
 	return []string{"none", "client_secret_basic", "client_secret_post"}
+}
+
+// EffectiveClientPolicy is the policy with its scope ceiling resolved. allowed_scopes and
+// scopes_supported were two lists that almost always had to say the same thing, and disagreeing
+// silently changed what a client could ask for, so leaving allowed_scopes unset now means "whatever
+// this server supports". Set it only to hold registered clients to less than first party login gets.
+func (oAuthServerConfig OAuthServerConfig) EffectiveClientPolicy() OAuthClientPolicy {
+	policy := oAuthServerConfig.ClientPolicy
+	if len(policy.AllowedScopes) == 0 {
+		policy.AllowedScopes = oAuthServerConfig.Scopes()
+	}
+	return policy
 }
 
 func (policy OAuthClientPolicy) Scopes() []string {

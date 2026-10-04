@@ -317,3 +317,92 @@ func RuleScorecardHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"scores": scores, "summary": agentspec.ScoreSummary(scores)})
 	}
 }
+
+// ToolConnection is one saved tool as the tools screen lists it.
+type ToolConnection struct {
+	ToolName string `json:"tool_name"`
+	ToolType string `json:"tool_type"`
+	// Inherited is true for a tool saved at the project and shared into this
+	// tenant: the tenant can use it but cannot edit or remove it.
+	Inherited bool `json:"inherited"`
+	// UsedBy names the agents in this tenant that attach the tool or let an
+	// orchestrator plan with it. Workflows in eru-functions are not counted.
+	UsedBy []string `json:"used_by"`
+}
+
+// ToolOverviewHandler lists a tenant's tool connections with where each one
+// comes from and which agents depend on it, so a screen can refuse to delete a
+// tool that agents still call.
+func ToolOverviewHandler(sh *module_store.StoreHolder) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		projectId, tenantId := vars["project"], vars["tenant"]
+		prj, err := sh.Store.GetProjectConfig(r.Context(), projectId)
+		if err != nil {
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		usedBy := map[string][]string{}
+		if stored, sErr := StoredAgents(r.Context(), sh, projectId, tenantId); sErr == nil {
+			for _, agent := range stored {
+				raw, mErr := json.Marshal(agent.GetSpec())
+				if mErr != nil {
+					continue
+				}
+				var spec struct {
+					AgentName  string `json:"agent_name"`
+					AgentTools []struct {
+						ToolName string `json:"tool_name"`
+					} `json:"agent_tools"`
+					AvailableTools []struct {
+						ToolName string `json:"tool_name"`
+					} `json:"available_tools"`
+				}
+				if json.Unmarshal(raw, &spec) != nil {
+					continue
+				}
+				seen := map[string]bool{}
+				for _, t := range spec.AgentTools {
+					seen[t.ToolName] = true
+				}
+				for _, t := range spec.AvailableTools {
+					seen[t.ToolName] = true
+				}
+				for name := range seen {
+					usedBy[name] = append(usedBy[name], spec.AgentName)
+				}
+			}
+		}
+		out := []ToolConnection{}
+		seen := map[string]bool{}
+		for _, tid := range eru_utils.TenantLookupOrder(r.Context(), tenantId, projectId) {
+			tenant, ok := prj.Tenants[tid]
+			if !ok {
+				continue
+			}
+			names := make([]string, 0, len(tenant.Tools))
+			for name := range tenant.Tools {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				conn := ToolConnection{ToolName: name, Inherited: tid != tenantId, UsedBy: []string{}}
+				if v, e := tenant.Tools[name].GetAttribute(r.Context(), "tool_type"); e == nil {
+					conn.ToolType = fmt.Sprint(v)
+				}
+				if agents := usedBy[name]; agents != nil {
+					sort.Strings(agents)
+					conn.UsedBy = agents
+				}
+				out = append(out, conn)
+			}
+		}
+		server_handlers.FormatResponse(w, 200)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"tools": out})
+	}
+}

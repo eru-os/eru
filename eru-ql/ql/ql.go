@@ -222,6 +222,17 @@ func (qld *QLData) verifyWrapApplicable(ctx context.Context) (err error) {
 func (qld *QLData) wrapQuery(ctx context.Context, query string, sr ds.SqlMakerI) (wrappedQuery string, err error) {
 	logs.WithContext(ctx).Debug("wrapQuery - Start")
 	w := qld.WrapConfig
+	if !qld.GroupBy.Active {
+		return applyWrapConfig(ctx, query, sr, w)
+	}
+	wrappedQuery, err = applyWrapConfig(ctx, query, sr, module_model.QueryWrapConfig{Filter: w.Filter})
+	if err != nil {
+		return "", err
+	}
+	return qld.wrapGroupBy(ctx, wrappedQuery)
+}
+
+func applyWrapConfig(ctx context.Context, query string, sr ds.SqlMakerI, w module_model.QueryWrapConfig) (wrappedQuery string, err error) {
 	if len(w.Filter) == 0 && len(w.Sort) == 0 && w.Limit == 0 && w.Skip == 0 {
 		return query, nil
 	}
@@ -492,7 +503,7 @@ func (qld *QLData) secureSQL(ctx context.Context, query string, projectId string
 						logs.WithContext(ctx).Error(er.Error())
 						return
 					}
-					oc, _ := processWhereClause(ctx, onClause, "", table.TableName, true, false)
+					oc, _ := processWhereClause(ctx, onClause, "", table.TableName, true, false, nil)
 					q = fmt.Sprint(q, " left join ", srJoin, " on ", oc)
 				}
 				q = fmt.Sprint(q, " where ", sRulesStr)

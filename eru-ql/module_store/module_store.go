@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
 	common_types "github.com/eru-os/eru/eru-ql/common_types"
+  "github.com/eru-os/eru/eru-ql/derived"
 	"github.com/eru-os/eru/eru-ql/ds"
 	"github.com/eru-os/eru/eru-ql/module_model"
 	eru_writes "github.com/eru-os/eru/eru-read-write/eru_writes"
@@ -32,6 +34,10 @@ const (
 	StoreTenantDsTableName    = "eruql_tenant_datasource"
 	StoreTenantQueryTableName = "eruql_tenant_queries"
 )
+
+const derivedFieldNamePattern = "^[a-z_][a-z0-9_]*$"
+
+var derivedFieldNameRegex = regexp.MustCompile(derivedFieldNamePattern)
 
 type MyQueryListItem struct {
 	QueryName string `json:"query_name"`
@@ -158,6 +164,10 @@ type ModuleStoreI interface {
 	RemoveTableSecurity(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, realStore ModuleStoreI) (err error)
 	SaveTableTransformation(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, transformRules module_model.TransformRules, realStore ModuleStoreI) (err error)
 	SaveColumnMasking(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, colName string, columnMasking common_types.ColumnMasking, realStore ModuleStoreI) (err error)
+	SaveDerivedField(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, derivedField common_types.DerivedFieldMetaData, prevFieldName string, realStore ModuleStoreI) (err error)
+	RemoveDerivedField(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, fieldName string, realStore ModuleStoreI) (err error)
+	GetDerivedFields(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string) (derivedFields map[string]common_types.DerivedFieldMetaData, err error)
+	ValidateDerivedField(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, derivedField common_types.DerivedFieldMetaData) (result derived.ValidationResult, err error)
 	GetTableTransformation(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string) (transformRules module_model.TransformRules, err error)
 	DropSchemaTable(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, realStore ModuleStoreI) (err error)
 	RemoveSchemaTable(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, realStore ModuleStoreI) (tables map[string]interface{}, err error)
@@ -460,6 +470,7 @@ func (ms *ModuleStore) SaveDataSource(ctx context.Context, projectId string, ten
 	if dsMap[datasource.DbAlias] != nil {
 		datasource.SchemaTables = dsMap[datasource.DbAlias].SchemaTables
 		datasource.SchemaTablesSecurity = dsMap[datasource.DbAlias].SchemaTablesSecurity
+		datasource.DerivedFields = dsMap[datasource.DbAlias].DerivedFields
 		datasource.TableJoins = dsMap[datasource.DbAlias].TableJoins
 		datasource.DbSecurityRules = dsMap[datasource.DbAlias].DbSecurityRules
 		datasource.SchemaTablesTransformation = dsMap[datasource.DbAlias].SchemaTablesTransformation
@@ -647,6 +658,7 @@ func (ms *ModuleStore) UpdateSchemaTables(ctx context.Context, projectId string,
 	for i := 0; i < len(tmpList); i++ {
 		delete(datasource.OtherTables, tmpList[i])
 	}
+	ms.revalidateDerivedFields(ctx, datasource)
 	logs.WithContext(ctx).Info("SaveStore called from UpdateSchemaTables")
 	return datasource, ms.persistDataSource(ctx, projectId, resolvedTenantId, datasource, realStore)
 }
@@ -728,12 +740,18 @@ func (ms *ModuleStore) RemoveSchemaTable(ctx context.Context, projectId string, 
 		logs.WithContext(ctx).Error(err.Error())
 		return nil, err
 	}
+	if users := datasource.DerivedFieldsHoppingTo(tableName); len(users) > 0 {
+		err = errors.New(fmt.Sprint("cannot remove ", tableName, " from the schema - derived field(s) ", strings.Join(users, ", "), " reach it"))
+		logs.WithContext(ctx).Error(err.Error())
+		return nil, err
+	}
 	if val, ok := datasource.SchemaTables[tableName]; ok {
 		if datasource.OtherTables == nil {
 			datasource.OtherTables = make(map[string]map[string]common_types.TableColsMetaData)
 		}
 		datasource.OtherTables[tableName] = val
 		delete(datasource.SchemaTables, tableName)
+		delete(datasource.DerivedFields, tableName)
 		for k, v := range datasource.TableJoins {
 			tempStr := strings.SplitN(k, "___", 2)
 			if tempStr[1] == tableName {
@@ -786,6 +804,11 @@ func (ms *ModuleStore) RemoveSchemaJoin(ctx context.Context, projectId string, t
 	datasource, resolvedTenantId, found := ms.resolveDataSourceForWrite(projectId, tenantId, dbAlias)
 	if !found {
 		err = errors.New(fmt.Sprint("Datasource ", dbAlias, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return nil, err
+	}
+	if users := datasource.DerivedFieldsUsingJoin(tj.Table1Name, tj.Table2Name); len(users) > 0 {
+		err = errors.New(fmt.Sprint("cannot remove the join between ", tj.Table1Name, " and ", tj.Table2Name, " - derived field(s) ", strings.Join(users, ", "), " travel it"))
 		logs.WithContext(ctx).Error(err.Error())
 		return nil, err
 	}
@@ -1197,6 +1220,14 @@ func (ms *ModuleStore) SaveSchemaTable(ctx context.Context, projectId string, te
 				// Compare table structures to identify changes
 				diff := ms.CompareTableStructures(ctx, oldTableObj, tableObj)
 
+				for _, colName := range diff.DroppedColumns {
+					if users := db.DerivedFieldsUsingColumn(tableName, colName); len(users) > 0 {
+						err = errors.New(fmt.Sprint("cannot drop column ", colName, " from ", tableName, " - derived field(s) ", strings.Join(users, ", "), " read it"))
+						logs.WithContext(ctx).Error(err.Error())
+						return err
+					}
+				}
+
 				// Log the changes for debugging
 				logs.WithContext(ctx).Info(fmt.Sprintf("Table structure changes detected for %s:", tableName))
 				logs.WithContext(ctx).Info(fmt.Sprintf("  New columns: %d", len(diff.NewColumns)))
@@ -1516,6 +1547,9 @@ func (ms *ModuleStore) DropSchemaTable(ctx context.Context, projectId string, te
 				delete(db.OtherTables, tn)
 			}
 			if tableExists {
+				delete(db.DerivedFields, tn)
+			}
+			if tableExists {
 				//drop table
 				sr := ds.GetSqlMaker(db.DbName)
 				err := sr.DropTable(ctx, tn, db)
@@ -1626,4 +1660,256 @@ func LoadStore(ctx context.Context, StoreTableName string, StoreTenantTableName 
 	}
 	//s.Store = myStore
 	return myStore, err
+}
+
+func unqualifyTableName(tableName string) string {
+	if i := strings.LastIndex(tableName, "."); i >= 0 {
+		return tableName[i+1:]
+	}
+	return tableName
+}
+
+func validateDerivedFieldName(name string) error {
+	if name == "" {
+		return errors.New("derived field name is mandatory")
+	}
+	if !derivedFieldNameRegex.MatchString(name) {
+		return errors.New(fmt.Sprint("derived field name ", name, " is invalid - expected ", derivedFieldNamePattern))
+	}
+	return nil
+}
+
+// revalidateDerivedFields re-resolves every derived field after the schema has
+// moved underneath. A field whose dependency vanished is marked invalid with a
+// reason rather than left to emit broken SQL; selecting it then fails with that
+// reason, and not selecting it costs nothing.
+// derivedLimits resolves the project's caps, falling back to the defaults.
+func (ms *ModuleStore) derivedLimits(ctx context.Context, projectId string) module_model.DerivedFieldLimits {
+	if prj, ok := ms.Projects[projectId]; ok {
+		return prj.ProjectSettings.DerivedFieldLimits.WithDefaults()
+	}
+	return module_model.DefaultDerivedFieldLimits()
+}
+
+func (ms *ModuleStore) revalidateDerivedFields(ctx context.Context, db *module_model.DataSource) {
+	if len(db.DerivedFields) == 0 {
+		return
+	}
+	sqlMaker := ds.GetSqlMaker(db.DbName)
+	if sqlMaker == nil {
+		return
+	}
+	dialect := sqlMaker.GetCalcDialect(ctx)
+	for tableName, fields := range db.DerivedFields {
+		for name, df := range fields {
+			reason := derived.Revalidate(derived.CompileRequest{
+				Schema: derived.Schema{
+					Tables:  db.SchemaTables,
+					Derived: db.DerivedFields,
+					Joins:   db.DerivedHopLookup(ctx),
+				},
+				Table:        tableName,
+				Field:        df,
+				Dialect:      dialect,
+				OuterAlias:   unqualifyTableName(tableName),
+				AllowHops:    true,
+				ValidateOnly: true,
+			})
+			invalid := reason != ""
+			if df.Invalid == invalid && df.InvalidReason == reason {
+				continue
+			}
+			df.Invalid = invalid
+			df.InvalidReason = reason
+			if df.Invalid {
+				logs.WithContext(ctx).Warn(fmt.Sprint("derived field ", tableName, ".", name, " is now invalid: ", reason))
+			} else {
+				logs.WithContext(ctx).Info(fmt.Sprint("derived field ", tableName, ".", name, " resolves again"))
+			}
+			db.DerivedFields[tableName][name] = df
+		}
+	}
+}
+
+func (ms *ModuleStore) SaveDerivedField(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, derivedField common_types.DerivedFieldMetaData, prevFieldName string, realStore ModuleStoreI) (err error) {
+	logs.WithContext(ctx).Debug("SaveDerivedField - Start")
+	realStore.GetMutex().Lock()
+	defer realStore.GetMutex().Unlock()
+
+	if err = validateDerivedFieldName(derivedField.ColName); err != nil {
+		logs.WithContext(ctx).Error(err.Error())
+		return err
+	}
+	if prevFieldName != "" && prevFieldName != derivedField.ColName {
+		if err = validateDerivedFieldName(prevFieldName); err != nil {
+			logs.WithContext(ctx).Error(err.Error())
+			return err
+		}
+	}
+	if derivedField.CalcMode == "" {
+		derivedField.CalcMode = common_types.CalcModeVirtual
+	}
+	if derivedField.CalcMode != common_types.CalcModeVirtual {
+		err = errors.New(fmt.Sprint("calc_mode ", derivedField.CalcMode, " is not supported - use ", common_types.CalcModeVirtual))
+		logs.WithContext(ctx).Error(err.Error())
+		return err
+	}
+
+	db, resolvedTenantId, found := ms.resolveDataSourceForWrite(projectId, tenantId, dbAlias)
+	if _, projOk := ms.Projects[projectId]; !projOk {
+		err = errors.New(fmt.Sprint("Project ", projectId, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return err
+	}
+	if !found {
+		err = errors.New(fmt.Sprint("Datasource ", dbAlias, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return err
+	}
+	if _, tableOk := db.SchemaTables[tableName]; !tableOk {
+		err = errors.New(fmt.Sprint("Table ", tableName, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return err
+	}
+
+	// Re-parse and re-resolve. Everything a client sends beyond the formula -
+	// calc_ast, calc_deps, calc_joins, calc_result_type - is a claim, and what
+	// gets stored is what our own compiler produced.
+	sqlMaker := ds.GetSqlMaker(db.DbName)
+	if sqlMaker == nil {
+		err = errors.New(fmt.Sprint("no sql maker for ", db.DbName))
+		logs.WithContext(ctx).Error(err.Error())
+		return err
+	}
+	validated, vErr := derived.Validate(derived.CompileRequest{
+		Schema: derived.Schema{
+			Tables:  db.SchemaTables,
+			Derived: db.DerivedFields,
+			Joins:   db.DerivedHopLookup(ctx),
+		},
+		Table:          tableName,
+		Field:          derivedField,
+		Dialect:        sqlMaker.GetCalcDialect(ctx),
+		OuterAlias:     unqualifyTableName(tableName),
+		AllowHops:      true,
+		MaxInlineDepth: ms.derivedLimits(ctx, projectId).MaxInlineDepth,
+	})
+	if vErr != nil {
+		logs.WithContext(ctx).Info(vErr.Error())
+		return vErr
+	}
+	derivedField = validated.Field
+
+	if db.DerivedFields == nil {
+		db.DerivedFields = make(map[string]map[string]common_types.DerivedFieldMetaData)
+	}
+	if db.DerivedFields[tableName] == nil {
+		db.DerivedFields[tableName] = make(map[string]common_types.DerivedFieldMetaData)
+	}
+	if prevFieldName != "" && prevFieldName != derivedField.ColName {
+		if _, prevOk := db.DerivedFields[tableName][prevFieldName]; !prevOk {
+			err = errors.New(fmt.Sprint("derived field ", prevFieldName, " not found on ", tableName))
+			logs.WithContext(ctx).Error(err.Error())
+			return err
+		}
+		delete(db.DerivedFields[tableName], prevFieldName)
+	}
+	db.DerivedFields[tableName][derivedField.ColName] = derivedField
+
+	logs.WithContext(ctx).Info(fmt.Sprint("SaveStore called from SaveDerivedField ", tableName, ".", derivedField.ColName))
+	return ms.persistDataSource(ctx, projectId, resolvedTenantId, db, realStore)
+}
+
+func (ms *ModuleStore) RemoveDerivedField(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, fieldName string, realStore ModuleStoreI) (err error) {
+	logs.WithContext(ctx).Debug("RemoveDerivedField - Start")
+	realStore.GetMutex().Lock()
+	defer realStore.GetMutex().Unlock()
+
+	db, resolvedTenantId, found := ms.resolveDataSourceForWrite(projectId, tenantId, dbAlias)
+	if _, projOk := ms.Projects[projectId]; !projOk {
+		err = errors.New(fmt.Sprint("Project ", projectId, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return err
+	}
+	if !found {
+		err = errors.New(fmt.Sprint("Datasource ", dbAlias, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return err
+	}
+	if _, ok := db.DerivedFields[tableName][fieldName]; !ok {
+		err = errors.New(fmt.Sprint("derived field ", fieldName, " not found on ", tableName))
+		logs.WithContext(ctx).Error(err.Error())
+		return err
+	}
+	delete(db.DerivedFields[tableName], fieldName)
+	if len(db.DerivedFields[tableName]) == 0 {
+		delete(db.DerivedFields, tableName)
+	}
+
+	logs.WithContext(ctx).Info(fmt.Sprint("SaveStore called from RemoveDerivedField ", tableName, ".", fieldName))
+	return ms.persistDataSource(ctx, projectId, resolvedTenantId, db, realStore)
+}
+
+func (ms *ModuleStore) GetDerivedFields(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string) (derivedFields map[string]common_types.DerivedFieldMetaData, err error) {
+	logs.WithContext(ctx).Debug("GetDerivedFields - Start")
+	db, _, found := ms.resolveDataSource(ctx, projectId, tenantId, dbAlias)
+	if _, projOk := ms.Projects[projectId]; !projOk {
+		err = errors.New(fmt.Sprint("Project ", projectId, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return nil, err
+	}
+	if !found {
+		err = errors.New(fmt.Sprint("Datasource ", dbAlias, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return nil, err
+	}
+	if _, ok := db.SchemaTables[tableName]; !ok {
+		err = errors.New(fmt.Sprint("Table ", tableName, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return nil, err
+	}
+	derivedFields = make(map[string]common_types.DerivedFieldMetaData)
+	for fieldName, df := range db.DerivedFields[tableName] {
+		derivedFields[fieldName] = df
+	}
+	return derivedFields, nil
+}
+
+// ValidateDerivedField compiles a formula against the live schema without
+// persisting anything, and returns the SQL the database would actually run.
+func (ms *ModuleStore) ValidateDerivedField(ctx context.Context, projectId string, tenantId string, dbAlias string, tableName string, derivedField common_types.DerivedFieldMetaData) (result derived.ValidationResult, err error) {
+	logs.WithContext(ctx).Debug("ValidateDerivedField - Start")
+	db, _, found := ms.resolveDataSource(ctx, projectId, tenantId, dbAlias)
+	if _, projOk := ms.Projects[projectId]; !projOk {
+		err = errors.New(fmt.Sprint("Project ", projectId, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return result, err
+	}
+	if !found {
+		err = errors.New(fmt.Sprint("Datasource ", dbAlias, " not found"))
+		logs.WithContext(ctx).Error(err.Error())
+		return result, err
+	}
+	sqlMaker := ds.GetSqlMaker(db.DbName)
+	if sqlMaker == nil {
+		err = errors.New(fmt.Sprint("no sql maker for ", db.DbName))
+		logs.WithContext(ctx).Error(err.Error())
+		return result, err
+	}
+	result, err = derived.Validate(derived.CompileRequest{
+		Schema: derived.Schema{
+			Tables:  db.SchemaTables,
+			Derived: db.DerivedFields,
+			Joins:   db.DerivedHopLookup(ctx),
+		},
+		Table:      tableName,
+		Field:      derivedField,
+		Dialect:    sqlMaker.GetCalcDialect(ctx),
+		OuterAlias: unqualifyTableName(tableName),
+		AllowHops:  true,
+	})
+	if err != nil {
+		logs.WithContext(ctx).Info(err.Error())
+	}
+	return result, err
 }

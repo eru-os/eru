@@ -8,6 +8,7 @@ import (
 
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
 	"github.com/eru-os/eru/eru-ql/module_model"
+  "github.com/eru-os/eru/eru-ql/derived"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 )
@@ -275,4 +276,8 @@ var mysqlDataTypeMapping = map[string]string{
 	"mediumtext":       "Varchar",
 	"longtext":         "Varchar",
 	"json":             "JSON",
+}
+
+func (mr *MysqlSqlMaker) GetCalcDialect(ctx context.Context) derived.Dialect {
+	return derived.MysqlDialect()
 }

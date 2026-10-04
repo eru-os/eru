@@ -12,6 +12,7 @@ import (
 	common_types "github.com/eru-os/eru/eru-ql/common_types"
 	"github.com/eru-os/eru/eru-ql/module_model"
 	"github.com/eru-os/eru/eru-ql/qlcache"
+  "github.com/eru-os/eru/eru-ql/derived"
 	"github.com/eru-os/eru/eru-security-rule/security_rule"
 	"github.com/graphql-go/graphql/language/ast"
 	"github.com/graphql-go/graphql/language/kinds"
@@ -152,6 +153,33 @@ type SqlMakerI interface {
 	ExtractDMLTargetTables(ctx context.Context, query string) []string
 	DefaultSchemaName() string
 	GetResultDataTypes(ctx context.Context) []ResultDataTypes
+	GetCalcDialect(ctx context.Context) derived.Dialect
+	RewriteDerivedFields(ctx context.Context, req DerivedRewriteRequest) (string, error)
+}
+
+// DerivedRewriteRequest is everything the SQL entry point needs to turn
+// qualified references to derived fields into expressions.
+type DerivedRewriteRequest struct {
+	Query      string
+	DataSource *module_model.DataSource
+	Security   derived.SecuredSource
+	Limits     module_model.DerivedFieldLimits
+}
+
+// RewriteDerivedFields is a no-op outside postgres: only PostgresSqlMaker can
+// parse a statement, so derived fields in hand-written SQL are postgres-only.
+// GraphQL mode has no such limit - it never parses SQL.
+func (sqr *SqlMaker) RewriteDerivedFields(ctx context.Context, req DerivedRewriteRequest) (string, error) {
+	if len(req.DataSource.DerivedFields) > 0 {
+		logs.WithContext(ctx).Warn("derived fields in hand-written SQL are supported on postgres only - references will be passed through to the database")
+	}
+	return req.Query, nil
+}
+
+// GetCalcDialect returns the postgres baseline. Each maker overrides only its
+// deltas - derived.Dialect has a postgres-shaped zero value.
+func (sqr *SqlMaker) GetCalcDialect(ctx context.Context) derived.Dialect {
+	return derived.PostgresDialect()
 }
 
 func (sqr *SqlMaker) GetBlockedWords() []string {

@@ -88,7 +88,7 @@ type ToolCatalogAccessRequest struct {
 // access overlay wins over defaultPublic (the tool's code level tag) when it
 // sets public explicitly, and an allowed tenant always sees the entry.
 func (ps ProjectSettings) IsToolVisible(toolType string, defaultPublic bool, tenantId string) bool {
-	access, ok := ps.ToolCatalogAccess[toolType]
+	_, access, ok := ps.accessFor(toolType)
 	if !ok {
 		return defaultPublic
 	}
@@ -110,6 +110,28 @@ func (ps ProjectSettings) IsToolVisible(toolType string, defaultPublic bool, ten
 	return false
 }
 
+// accessFor finds a tool type's access overlay. Catalog types used to be
+// spelled differently from the factory's (MsEmail for MS_EMAIL, Eruql for
+// ERUQL) and access saved under those spellings must keep applying, so a
+// lookup that misses by exact key matches ignoring case and underscores. It
+// returns the key the overlay is stored under.
+func (ps ProjectSettings) accessFor(toolType string) (string, ToolCatalogAccess, bool) {
+	if access, ok := ps.ToolCatalogAccess[toolType]; ok {
+		return toolType, access, true
+	}
+	want := foldToolType(toolType)
+	for key, access := range ps.ToolCatalogAccess {
+		if foldToolType(key) == want {
+			return key, access, true
+		}
+	}
+	return "", ToolCatalogAccess{}, false
+}
+
+func foldToolType(toolType string) string {
+	return strings.ToLower(strings.ReplaceAll(toolType, "_", ""))
+}
+
 func (ps *ProjectSettings) SetToolCatalogAccess(ctx context.Context, accessRequest ToolCatalogAccessRequest) error {
 	logs.WithContext(ctx).Debug("SetToolCatalogAccess - Start")
 	if accessRequest.ToolType == "" {
@@ -120,7 +142,12 @@ func (ps *ProjectSettings) SetToolCatalogAccess(ctx context.Context, accessReque
 	if ps.ToolCatalogAccess == nil {
 		ps.ToolCatalogAccess = make(map[string]ToolCatalogAccess)
 	}
-	access := ps.ToolCatalogAccess[accessRequest.ToolType]
+	legacyKey, access, _ := ps.accessFor(accessRequest.ToolType)
+	if legacyKey != "" && legacyKey != accessRequest.ToolType {
+		// Rewritten under the canonical type, so the old spelling does not
+		// linger as a second, stale entry.
+		delete(ps.ToolCatalogAccess, legacyKey)
+	}
 	if accessRequest.Public != nil {
 		public := *accessRequest.Public
 		access.Public = &public

@@ -74,7 +74,7 @@ func (auth *Auth) AuthorizationFlow(ctx context.Context, projectId string) (Auth
 			AuthName:  auth.AuthName,
 			Issuer:    auth.OAuthIssuer(ctx),
 			Registry:  registry,
-			Policy:    auth.OAuthServerConfig.ClientPolicy,
+			Policy:    auth.OAuthServerConfig.EffectiveClientPolicy(),
 		}, nil
 	default:
 		err := errors.New(fmt.Sprint("unknown oauth server backend : ", backend))
@@ -86,7 +86,7 @@ func (auth *Auth) AuthorizationFlow(ctx context.Context, projectId string) (Auth
 // GrantableScope narrows what a consent step may grant to what the project allows, so a client
 // cannot widen its own grant by asking for more than it registered for.
 func (oAuthServerConfig OAuthServerConfig) GrantableScope(requestedScope []string) []string {
-	allowed := oAuthServerConfig.ClientPolicy.Scopes()
+	allowed := oAuthServerConfig.EffectiveClientPolicy().Scopes()
 	var grantScope []string
 	for _, scope := range requestedScope {
 		if contains(allowed, scope) {

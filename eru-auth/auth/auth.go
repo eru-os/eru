@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -26,6 +25,7 @@ import (
 type AuthI interface {
 	//Login(req *http.Request) (res interface{}, cookies []*http.Cookie, err error)
 	SetAuthDb(authDbI AuthDbI)
+	SetTokenContext(projectId string, signer TokenSignerI, self AuthI)
 	GetAuthDb() (authDbI AuthDbI)
 	Login(ctx context.Context, loginPostBody LoginPostBody, projectId string, withTokens bool, s storepkg.StoreI) (identity Identity, loginSuccess LoginSuccess, err error)
 	IdpToken(ctx context.Context, idpToken LoginPostBody, projectId string, withTokens bool, renewFlag bool, s storepkg.StoreI) (loginResI interface{}, err error)
@@ -163,25 +163,34 @@ type LoginSuccess struct {
 }
 
 type Auth struct {
-	AuthType           string            `json:"auth_type"`
-	AuthName           string            `json:"auth_name"`
-	TokenHeaderKey     string            `json:"token_header_key"`
-	Hooks              AuthHooks         `json:"hooks" eru:"optional"`
-	AuthDb             AuthDbI           `json:"-"`
-	PKCE               bool              `json:"pkce"`
-	TokenBackendConfig json.RawMessage   `json:"hydra,omitempty"`
-	OAuthServerConfig  OAuthServerConfig `json:"oauth_server"`
-	KmsId              string            `json:"key_id"`
-	KmsKey             kms.KmsStoreI     `json:"-"`
+	AuthType           string          `json:"auth_type"`
+	AuthName           string          `json:"auth_name"`
+	TokenHeaderKey     string          `json:"token_header_key"`
+	Hooks              AuthHooks       `json:"hooks" eru:"optional"`
+	AuthDb             AuthDbI         `json:"-"`
+	PKCE               bool            `json:"pkce"`
+	TokenBackendConfig json.RawMessage `json:"hydra,omitempty"`
+
+	// Set by the store when an auth is cloned for a request. They are not configuration - the
+	// project an auth was loaded for, and the means to sign with that project's keys.
+	ProjectId   string       `json:"-"`
+	TokenSigner TokenSignerI `json:"-"`
+	// Self is the concrete auth this Auth is embedded in. A method reached through the embedded
+	// struct has no knowledge of its outer type, so calling GetUser on the embedded value gets the
+	// stub rather than EruAuth's implementation. Anything needing an overridden method goes via
+	// concrete().
+	Self              AuthI             `json:"-"`
+	OAuthServerConfig OAuthServerConfig `json:"oauth_server"`
+	KmsId             string            `json:"key_id"`
+	KmsKey            kms.KmsStoreI     `json:"-"`
 }
 
 type AuthHooks struct {
-	SRC  functions.Route `json:"src"`
-	SRCF string          `json:"srcf"`
-	SVCF string          `json:"svcf"`
-	SWEF string          `json:"swef"`
-	USRP string          `json:"usrp"`
-	USRR string          `json:"usrr"`
+	SRCF string `json:"srcf"`
+	SVCF string `json:"svcf"`
+	SWEF string `json:"swef"`
+	USRP string `json:"usrp"`
+	USRR string `json:"usrr"`
 }
 
 type IdentifierConfig struct {
@@ -218,6 +227,23 @@ type RemoveUser struct {
 
 func (auth *Auth) SetAuthDb(authDbI AuthDbI) {
 	auth.AuthDb = authDbI
+}
+
+// SetTokenContext records which project this auth was loaded for and how to sign with its keys, so
+// the built in token backend can mint without reaching back into the store.
+func (auth *Auth) SetTokenContext(projectId string, signer TokenSignerI, self AuthI) {
+	auth.ProjectId = projectId
+	auth.TokenSigner = signer
+	auth.Self = self
+}
+
+// concrete returns the auth to call overridable methods on: the outer type when one was recorded,
+// and otherwise this value, which keeps a bare Auth usable in tests.
+func (auth *Auth) concrete() AuthI {
+	if auth.Self != nil {
+		return auth.Self
+	}
+	return auth
 }
 
 func (auth *Auth) GetAuthDb() (authDbI AuthDbI) {
@@ -266,31 +292,7 @@ func (auth *Auth) SendCode(ctx context.Context, credentialIdentifier string, rec
 	trReqVars.Vars["recovery_time"] = recovery_time
 	trReqVars.Vars["name"] = name
 
-	r := &http.Request{}
-	rurl := url.URL{
-		Scheme: "",
-		Host:   "",
-		Path:   "/",
-	}
-	r.URL = &rurl
-	rBytes, rBytesErr := json.Marshal(trReqVars.Vars)
-	if rBytesErr != nil {
-		return rBytesErr
-	}
-	r.Body = io.NopCloser(strings.NewReader(string(rBytes)))
-	h := http.Header{}
-	h.Set("content-type", "application/json")
-	r.Header = h
-	r.Header.Set("Content-Length", strconv.Itoa(len(rBytes)))
-	r.ContentLength = int64(len(rBytes))
-
 	srcHookFound := false
-	logs.WithContext(ctx).Info(auth.Hooks.SRC.RouteName)
-	if auth.Hooks.SRC.RouteName != "" {
-		_, _, respErr := auth.Hooks.SRC.Execute(r.Context(), r, "/", false, "", trReqVars, 1)
-		srcHookFound = true
-		return respErr
-	}
 	if purpose == OTP_PURPOSE_RECOVERY {
 		logs.WithContext(ctx).Info(auth.Hooks.SRCF)
 		if auth.Hooks.SRCF != "" {

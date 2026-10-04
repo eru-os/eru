@@ -26,7 +26,7 @@ type ClevertapTool struct {
 type ClevertapAccount struct {
 	BaseUrl   string `json:"base_url" eru:"required"`
 	AccountId string `json:"account_id" eru:"required"`
-	Passcode  string `json:"passcode" eru:"required"`
+	Passcode  string `json:"passcode" secret:"true" eru:"required"`
 }
 
 type FetchEventsParams struct {

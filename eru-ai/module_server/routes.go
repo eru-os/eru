@@ -73,6 +73,8 @@ func AddModuleRoutes(serverRouter *mux.Router, sh *module_store.StoreHolder) {
 	storeRouter.Methods(http.MethodPost).Path("/{project}/{tenant}/validate/agent").HandlerFunc(module_handlers.AgentValidateHandler(sh))
 	storeRouter.Methods(http.MethodGet).Path("/{project}/{tenant}/agent/builder/context").HandlerFunc(module_handlers.AgentBuilderContextHandler(sh))
 	storeRouter.Methods(http.MethodGet).Path("/{project}/{tenant}/models").HandlerFunc(module_handlers.ModelListHandler(sh))
+	storeRouter.Methods(http.MethodGet).Path("/{project}/{tenant}/tools/overview").HandlerFunc(module_handlers.ToolOverviewHandler(sh))
+	storeRouter.Methods(http.MethodGet).Path("/{project}/{tenant}/secret/names").HandlerFunc(module_handlers.SecretNamesHandler(sh))
 
 	storeRouter.Methods(http.MethodPost).Path("/{project}/{tenant}/save/vectorstore").HandlerFunc(module_handlers.VectorStoreSaveHandler(sh))
 	storeRouter.Methods(http.MethodDelete).Path("/{project}/{tenant}/remove/vectorstore/{vectorstorename}").HandlerFunc(module_handlers.VectorStoreRemoveHandler(sh))
@@ -114,6 +116,7 @@ func AddModuleRoutes(serverRouter *mux.Router, sh *module_store.StoreHolder) {
 	aiRouter.Methods(http.MethodGet).PathPrefix("/{tenant}/cburl/tool/{toolname}").HandlerFunc(module_handlers.ToolCbUrlHandler(sh))
 	aiRouter.PathPrefix("/callback/{tenant}/tool/{toolname}").HandlerFunc(module_handlers.ToolCallbackHandler(sh))
 	aiRouter.Methods(http.MethodPost).PathPrefix("/{tenant}/stream/{streamid}/event").HandlerFunc(module_handlers.AgentStreamEventHandler())
+	aiRouter.Methods(http.MethodPost).Path("/{tenant}/client/{agentname}/{requestid}/reply").HandlerFunc(module_handlers.ClientReplyHandler(sh))
 	aiRouter.Methods(http.MethodPost).PathPrefix("/{tenant}/execute/agent/{agentname}/{conversationid}/stream").HandlerFunc(module_handlers.AgentExecuteHandler(sh))
 	aiRouter.Methods(http.MethodPost).PathPrefix("/{tenant}/execute/agent/{agentname}/stream").HandlerFunc(module_handlers.AgentExecuteHandler(sh))
 	aiRouter.Methods(http.MethodPost).PathPrefix("/{tenant}/execute/agent/{agentname}/{conversationid}").HandlerFunc(module_handlers.AgentExecuteHandler(sh))

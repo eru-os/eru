@@ -89,7 +89,7 @@ func LoginApiHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 
 		fetchTokenFromReq.DisallowUnknownFields()
 		type fetchToken struct {
-			RefreshToken string `json:"refresh_token" eru:"required"`
+			RefreshToken string `json:"refresh_token"`
 			Id           string `json:"id" eru:"required"`
 		}
 		var fetchTokenObj fetchToken
@@ -123,14 +123,20 @@ func LoginApiHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			return
 		}
 
-		loginSuccess, err := authObjI.LoginApi(r.Context(), fetchTokenObj.RefreshToken, fetchTokenObj.Id)
+		refreshToken := refreshTokenFromRequest(r, authObjI, fetchTokenObj.RefreshToken)
+		if refreshToken == "" {
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "missing field in object : RefreshToken"})
+			return
+		}
+		loginSuccess, err := authObjI.LoginApi(r.Context(), refreshToken, fetchTokenObj.Id)
 		if err != nil {
 			server_handlers.FormatResponse(w, 400)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 			return
 		}
 		server_handlers.FormatResponse(w, http.StatusOK)
-		_ = json.NewEncoder(w).Encode(loginSuccess)
+		_ = json.NewEncoder(w).Encode(setRefreshCookieFromResult(w, r, authObjI, loginSuccess))
 		return
 	}
 }
@@ -376,7 +382,7 @@ func FetchTokensHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 
 		fetchTokenFromReq.DisallowUnknownFields()
 		type fetchToken struct {
-			RefreshToken string `json:"refresh_token" eru:"required"`
+			RefreshToken string `json:"refresh_token"`
 			Id           string `json:"id" eru:"required"`
 		}
 		var fetchTokenObj fetchToken
@@ -410,14 +416,20 @@ func FetchTokensHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			return
 		}
 
-		loginSuccess, err := authObjI.FetchTokens(r.Context(), fetchTokenObj.RefreshToken, fetchTokenObj.Id)
+		refreshToken := refreshTokenFromRequest(r, authObjI, fetchTokenObj.RefreshToken)
+		if refreshToken == "" {
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "missing field in object : RefreshToken"})
+			return
+		}
+		loginSuccess, err := authObjI.FetchTokens(r.Context(), refreshToken, fetchTokenObj.Id)
 		if err != nil {
 			server_handlers.FormatResponse(w, 400)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 			return
 		}
 		server_handlers.FormatResponse(w, http.StatusOK)
-		_ = json.NewEncoder(w).Encode(loginSuccess)
+		_ = json.NewEncoder(w).Encode(setRefreshCookieFromResult(w, r, authObjI, loginSuccess))
 		return
 	}
 }
@@ -643,9 +655,10 @@ func LoginHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 			return
 		} else {
+			setRefreshCookie(w, r, authObjI, tokens.RefreshToken)
 			server_handlers.FormatResponse(w, http.StatusOK)
 			if tokens.IdToken != "" {
-				_ = json.NewEncoder(w).Encode(tokens)
+				_ = json.NewEncoder(w).Encode(hideRefreshToken(r, authObjI, tokens))
 			} else {
 				_ = json.NewEncoder(w).Encode(res)
 			}
@@ -1011,6 +1024,7 @@ func LogoutHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 			return
 		} else {
+			clearRefreshCookie(w, r, authObjI)
 			server_handlers.FormatResponse(w, resStatusCode)
 			_ = json.NewEncoder(w).Encode(res)
 			return
@@ -1393,9 +1407,10 @@ func RegisterHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 			return
 		} else {
+			setRefreshCookie(w, r, authObjI, tokens.RefreshToken)
 			server_handlers.FormatResponse(w, http.StatusOK)
 			if tokens.IdToken != "" {
-				_ = json.NewEncoder(w).Encode(tokens)
+				_ = json.NewEncoder(w).Encode(hideRefreshToken(r, authObjI, tokens))
 			} else {
 				_ = json.NewEncoder(w).Encode(res)
 			}

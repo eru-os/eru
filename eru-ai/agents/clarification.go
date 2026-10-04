@@ -3,6 +3,7 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -29,7 +30,8 @@ func ClarificationAnswersParamSchema() eru_models.JSONSchema {
 			Properties: map[string]eru_models.JSONSchema{
 				"question_id": {Type: "string", Description: "The id of the question being answered."},
 				"selected":    {Type: "array", Description: "The option values the user picked.", Items: &eru_models.JSONSchema{Type: "string"}},
-				"answer":      {Type: "string", Description: "A free-text answer, when the question was not a choice."},
+				"free_text":   {Type: "string", Description: "A free-text answer, when the question was not a choice."},
+				"secret_ref":  {Type: "string", Description: "For a secret question: the $SECRET_<name> reference of the secret the user saved."},
 			},
 			Required: []string{"question_id"},
 		},
@@ -187,9 +189,109 @@ func (req *ClarificationRequest) Normalize() {
 			q.Id = fmt.Sprintf("q%d", i+1)
 		}
 		q.AllowFreeText = true
+		if q.IsSecret() {
+			NormalizeSecretQuestion(q)
+			continue
+		}
+		if q.InputType == InputTypeOAuth {
+			NormalizeOAuthQuestion(q)
+			continue
+		}
 		if q.FreeTextLabel == "" {
 			q.FreeTextLabel = DefaultFreeTextLabel
 		}
+	}
+}
+
+const (
+	InputTypeSecret = "secret"
+	// InputTypeOAuth asks the user to authorize a saved OAuth connection. The
+	// client shows an Authorize button for tool_name; the answer is only the
+	// user's confirmation that they finished.
+	InputTypeOAuth       = "oauth"
+	OAuthAuthorizedValue = "authorized"
+	// SecretFreeTextLabel names the box of a secret question: the user should
+	// know the value is not going to the assistant.
+	SecretFreeTextLabel = "Saved as a secret - the assistant never sees it"
+)
+
+var secretNameChars = regexp.MustCompile(`[^A-Za-z0-9_]+`)
+
+func (q ClarificationQuestion) IsSecret() bool {
+	return q.InputType == InputTypeSecret
+}
+
+// NormalizeSecretQuestion turns a question into a plain secret prompt: no
+// options to pick (a credential is never one of a list) and a secret name the
+// client can save under, made safe for a $SECRET_ reference.
+func NormalizeSecretQuestion(q *ClarificationQuestion) {
+	q.Options = nil
+	q.MultiSelect = false
+	q.AllowFreeText = true
+	q.FreeTextLabel = SecretFreeTextLabel
+	name := strings.Trim(secretNameChars.ReplaceAllString(q.SecretName, "_"), "_")
+	if name == "" {
+		name = strings.Trim(secretNameChars.ReplaceAllString(q.Id, "_"), "_")
+	}
+	q.SecretName = strings.ToLower(name)
+}
+
+// NormalizeOAuthQuestion leaves one answer - the user confirming they
+// authorized - since there is nothing to type.
+func NormalizeOAuthQuestion(q *ClarificationQuestion) {
+	q.Options = []QuestionOption{{Value: OAuthAuthorizedValue, Label: "I've authorized it"}}
+	q.MultiSelect = false
+	q.AllowFreeText = false
+	q.FreeTextLabel = ""
+	q.Required = true
+}
+
+func lookupQuestion(byId map[string]ClarificationQuestion, id string) (ClarificationQuestion, bool) {
+	if q, ok := byId[id]; ok {
+		return q, true
+	}
+	if idx := strings.LastIndex(id, "::"); idx >= 0 {
+		q, ok := byId[id[idx+2:]]
+		return q, ok
+	}
+	return ClarificationQuestion{}, false
+}
+
+// ScrubSecretAnswers removes any typed value from the answers to secret
+// questions, and from the message text, before the message is formatted for
+// the model or stored. A well-behaved client never sends the value - it saves
+// the secret and answers with secret_ref - so this is the guard for one that
+// does: the value must not reach the model, the transcript or the database.
+// req may be empty; an answer carrying secret_ref is treated as secret anyway.
+func ScrubSecretAnswers(msg *AgentMessage, req ClarificationRequest) {
+	answers, ok := msg.ClarificationAnswers()
+	if !ok {
+		return
+	}
+	byId := make(map[string]ClarificationQuestion, len(req.Questions))
+	for _, q := range req.Questions {
+		byId[q.Id] = q
+	}
+	changed := false
+	for i, ans := range answers {
+		q, known := lookupQuestion(byId, ans.QuestionId)
+		if ans.SecretRef == "" && !(known && q.IsSecret()) {
+			continue
+		}
+		if ans.FreeText == "" {
+			continue
+		}
+		if len(strings.TrimSpace(ans.FreeText)) >= 4 {
+			msg.Content = strings.ReplaceAll(msg.Content, ans.FreeText, "[secret]")
+		}
+		answers[i].FreeText = ""
+		changed = true
+	}
+	if changed {
+		var raw []interface{}
+		b, _ := json.Marshal(answers)
+		_ = json.Unmarshal(b, &raw)
+		msg.Params[ClarificationAnswersParamKey] = raw
 	}
 }
 
@@ -244,14 +346,7 @@ func FormatAnswersForModel(req ClarificationRequest, answers []ClarificationAnsw
 	// on the last segment keeps the question text attached to its answer, so the
 	// model reads "Q: ... A: ..." instead of a bare id it has to guess about.
 	lookup := func(id string) (ClarificationQuestion, bool) {
-		if q, ok := questionById[id]; ok {
-			return q, true
-		}
-		if idx := strings.LastIndex(id, "::"); idx >= 0 {
-			q, ok := questionById[id[idx+2:]]
-			return q, ok
-		}
-		return ClarificationQuestion{}, false
+		return lookupQuestion(questionById, id)
 	}
 
 	var sb strings.Builder
@@ -261,6 +356,14 @@ func FormatAnswersForModel(req ClarificationRequest, answers []ClarificationAnsw
 			sb.WriteString(fmt.Sprintf("- Q: %s\n", q.Question))
 		} else {
 			sb.WriteString(fmt.Sprintf("- Q (%s):\n", ans.QuestionId))
+		}
+		if q, ok := lookup(ans.QuestionId); (ok && q.IsSecret()) || ans.SecretRef != "" {
+			if ans.SecretRef != "" {
+				sb.WriteString(fmt.Sprintf("  A: saved as a secret - refer to it as %s\n", ans.SecretRef))
+			} else {
+				sb.WriteString("  A: (not saved - ask again)\n")
+			}
+			continue
 		}
 		var parts []string
 		if len(ans.Selected) > 0 {

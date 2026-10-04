@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
+  "github.com/eru-os/eru/eru-ql/derived"
 	"github.com/eru-os/eru/eru-ql/ds"
 	"github.com/eru-os/eru/eru-ql/module_model"
 	"github.com/eru-os/eru/eru-ql/module_store"
@@ -154,16 +155,20 @@ func (sqd *SQLData) Execute(ctx context.Context, projectId string, datasources m
 		}
 	}
 
+	// Rewrite qualified references to derived fields before anything else looks
+	// at the SQL, so secureSQL sees the final table set including hop targets
+	// and cache tags come out right.
+	sqd.Query, err = sqd.rewriteDerivedFields(ctx, projectId, sqd.Query, datasource, s, sr)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	queryObj := QueryObject{}
 	queryObj.Query = sqd.Query
 	queryObj.Cols = sqd.Cols
 	if sqd.ExecuteFlag {
 		sqd.Query = sqd.secureSQL(ctx, sqd.Query, projectId, datasource, s, sr)
 		if !qlcache.IsDML(sqd.Query) {
-			sqd.Query, err = sqd.wrapGroupBy(ctx, sqd.Query)
-			if err != nil {
-				return nil, nil, err
-			}
 			sqd.Query, err = sqd.wrapQuery(ctx, sqd.Query, sr)
 			if err != nil {
 				return nil, nil, err
@@ -228,10 +233,6 @@ func (sqd *SQLData) Execute(ctx context.Context, projectId string, datasources m
 	} else if sqd.OutputType == "ast" {
 		secureQuery := sqd.secureSQL(ctx, sqd.Query, projectId, datasource, s, sr)
 		if !qlcache.IsDML(secureQuery) {
-			secureQuery, err = sqd.wrapGroupBy(ctx, secureQuery)
-			if err != nil {
-				return nil, nil, err
-			}
 			secureQuery, err = sqd.wrapQuery(ctx, secureQuery, sr)
 			if err != nil {
 				return nil, nil, err
@@ -243,4 +244,26 @@ func (sqd *SQLData) Execute(ctx context.Context, projectId string, datasources m
 	}
 	queryObjs = append(queryObjs, queryObj)
 	return res, queryObjs, err
+}
+
+// rewriteDerivedFields turns table-qualified references to derived fields into
+// their compiled expressions. Postgres only - the base maker cannot parse a
+// statement.
+func (sqd *SQLData) rewriteDerivedFields(ctx context.Context, projectId string, query string, datasource *module_model.DataSource, s module_store.ModuleStoreI, sr ds.SqlMakerI) (string, error) {
+	if len(datasource.DerivedFields) == 0 {
+		return query, nil
+	}
+	limits := module_model.DefaultDerivedFieldLimits()
+	if ps, psErr := s.GetProjectSettingsObject(ctx, projectId); psErr == nil {
+		limits = ps.DerivedFieldLimits.WithDefaults()
+	}
+	return sr.RewriteDerivedFields(ctx, ds.DerivedRewriteRequest{
+		Query:      query,
+		DataSource: datasource,
+		// secureSQL runs on the rewritten statement and wraps every table it
+		// finds, so the hop targets this introduces are secured there rather
+		// than per hop. Applying the rule in both places produces invalid SQL.
+		Security: derived.SourceSecuredDownstream,
+		Limits:   limits,
+	})
 }

@@ -23,11 +23,12 @@ import (
 )
 
 const (
-	INSERT_PKCE_EVENT = "insert into eruauth_pkce_events (pkce_event_id,code_verifier,code_challenge,request_id,nonce,url) values ($1,$2,$3,$4,$5,$6)"
-	SELECT_PKCE_EVENT = "select * from eruauth_pkce_events where request_id = $1"
-	INSERT_API_TOKEN  = "insert into eruauth_api_tokens (api_token_id,identity_id,project_id,api_token_hash,api_token_name,api_token) values ($1,$2,$3,$4,$5,$6)"
-	UPDATE_API_TOKEN  = "update eruauth_api_tokens set api_token_status='INACTIVE' , updated_date=CURRENT_TIMESTAMP where api_token_id=$1"
-	SELECT_API_TOKEN  = "select api_token_id, project_id, identity_id, api_token_name, api_token, api_token_hash, api_token_status from eruauth_api_tokens where identity_id=$1"
+	INSERT_PKCE_EVENT      = "insert into eruauth_pkce_events (pkce_event_id,code_verifier,code_challenge,request_id,nonce,url) values ($1,$2,$3,$4,$5,$6)"
+	SELECT_PKCE_EVENT      = "select * from eruauth_pkce_events where request_id = $1"
+	INSERT_API_TOKEN       = "insert into eruauth_api_tokens (api_token_id,identity_id,project_id,api_token_hash,api_token_name,api_token) values ($1,$2,$3,$4,$5,$6)"
+	SELECT_IDENTITY_EXISTS = "select identity_id from eruauth_identities where identity_id = $1"
+	UPDATE_API_TOKEN       = "update eruauth_api_tokens set api_token_status='INACTIVE' , updated_date=CURRENT_TIMESTAMP where api_token_id=$1"
+	SELECT_API_TOKEN       = "select api_token_id, project_id, identity_id, api_token_name, api_token, api_token_hash, api_token_status from eruauth_api_tokens where identity_id=$1"
 	//SELECT_IDENTITY_SUB = "select * from eruauth_identities where identity_provider_id = $1"
 )
 
@@ -227,6 +228,39 @@ func (ms *ModuleStore) RemoveAuth(ctx context.Context, authName string, projectI
 	return realStore.SaveStore(ctx, projectId, "", realStore)
 }
 
+// storeTokenSigner signs and verifies with the project's rsa keys - the same keys eru-auth publishes
+// at its jwks endpoints, so a resource server validates these tokens against a key set it can
+// already fetch.
+type storeTokenSigner struct {
+	store ModuleStoreI
+}
+
+func (signer storeTokenSigner) SignToken(ctx context.Context, projectId string, kid string, claims map[string]interface{}) (string, error) {
+	if kid == "" {
+		return "", errors.New("oauth_server.signing_kid is not set")
+	}
+	keyPair, err := signer.store.GetSigningKid(ctx, projectId, fmt.Sprint("ERUAUTH_KID_", kid), signer.store)
+	if err != nil {
+		return "", err
+	}
+	header := map[string]interface{}{"alg": "RS256", "typ": "JWT", "kid": kid}
+	return erujwt.CreateJWT(ctx, keyPair.PrivateKey, claims, header)
+}
+
+// VerifyToken reads the key named in the token header rather than the configured signing key, so a
+// token signed by a since retired key still verifies - which is what makes rotation possible.
+func (signer storeTokenSigner) VerifyToken(ctx context.Context, projectId string, token string) (map[string]interface{}, error) {
+	kid := erujwt.TokenKid(ctx, token)
+	if kid == "" {
+		return nil, errors.New("token has no kid")
+	}
+	keyPair, err := signer.store.GetKid(ctx, fmt.Sprint("ERUAUTH_KID_", kid), projectId, signer.store)
+	if err != nil {
+		return nil, err
+	}
+	return erujwt.VerifyTokenWithPublicKey(ctx, token, keyPair.PublicKey)
+}
+
 func (ms *ModuleStore) GetAuthClone(ctx context.Context, projectId string, authName string, s ModuleStoreI) (authObjClone auth.AuthI, err error) {
 	logs.WithContext(ctx).Debug("GetAuthClone - Start")
 	prj, err := ms.GetProjectConfig(ctx, projectId)
@@ -241,6 +275,9 @@ func (ms *ModuleStore) GetAuthClone(ctx context.Context, projectId string, authN
 	} else {
 		authObjClone, err = ms.GetAuthCloneObject(ctx, projectId, authObj, s)
 		authObjClone.SetAuthDb(GetAuthDb(s.GetDbType()))
+		// The built in token backend mints with the project's keys, so it needs to know which
+		// project this auth was loaded for and how to sign for it.
+		authObjClone.SetTokenContext(projectId, storeTokenSigner{store: s}, authObjClone)
 		var kmsIdI interface{}
 		kmsIdI, err = authObjClone.GetAttribute(ctx, "key_id")
 		if err == nil && kmsIdI != nil {
@@ -456,16 +493,41 @@ func (ms *ModuleStore) RemoveKid(ctx context.Context, kid string, projectId stri
 func (ms *ModuleStore) SaveApiToken(ctx context.Context, identity_id string, kid string, projectId string, token_header map[string]interface{}, token_claims map[string]interface{}, tokenName string, realStore ModuleStoreI) (string, error) {
 	logs.WithContext(ctx).Debug("SaveApiToken - Start")
 
-	rsaKeyPair, err := ms.GetKid(ctx, kid, projectId, realStore)
+	// The token row has a foreign key to the identity. Checking first means a bad user_id is
+	// reported as such, instead of generating and persisting a signing key and only then failing on
+	// the insert - which left the key behind with no token to show for it.
+	identityQuery := store.Queries{Query: SELECT_IDENTITY_EXISTS}
+	identityQuery.Vals = append(identityQuery.Vals, identity_id)
+	identityOutput, err := realStore.ExecuteDbFetch(ctx, identityQuery)
 	if err != nil {
 		logs.WithContext(ctx).Error(err.Error())
-		rsaKeyPair, err = ms.SaveKid(ctx, kid, projectId, realStore, true)
+		return "", errors.New("Something went wrong, Please try again.")
 	}
+	if len(identityOutput) == 0 {
+		err = fmt.Errorf("user_id %s does not exist", identity_id)
+		logs.WithContext(ctx).Error(err.Error())
+		return "", err
+	}
+
+	kidCreated := false
+	rsaKeyPair, err := ms.GetKid(ctx, kid, projectId, realStore)
+	if err != nil {
+		logs.WithContext(ctx).Info(fmt.Sprint(kid, " not found, creating it : ", err.Error()))
+		rsaKeyPair, err = ms.SaveKid(ctx, kid, projectId, realStore, true)
+		if err != nil {
+			// Previously this error was discarded by the next assignment, so a failed key creation
+			// surfaced as a confusing signing failure instead.
+			logs.WithContext(ctx).Error(err.Error())
+			return "", errors.New("Something went wrong, Please try again.")
+		}
+		kidCreated = true
+	}
+
 	jwt, err := erujwt.CreateJWT(ctx, rsaKeyPair.PrivateKey, token_claims, token_header)
 	if err != nil {
-		logs.WithContext(ctx).Info(err.Error())
-		err = errors.New(fmt.Sprint("Something went wrong, Please try again."))
-		return "", err
+		logs.WithContext(ctx).Error(err.Error())
+		ms.removeKidCreatedFor(ctx, kidCreated, kid, projectId, realStore)
+		return "", errors.New("Something went wrong, Please try again.")
 	}
 	var queries []store.Queries
 	query := store.Queries{}
@@ -478,11 +540,23 @@ func (ms *ModuleStore) SaveApiToken(ctx context.Context, identity_id string, kid
 	queries = append(queries, query)
 	_, err = realStore.ExecuteDbSave(ctx, queries)
 	if err != nil {
-		logs.WithContext(ctx).Info(err.Error())
-		err = errors.New(fmt.Sprint("Something went wrong, Please try again."))
-		return "", err
+		logs.WithContext(ctx).Error(err.Error())
+		// A key generated for a token that was never stored is an orphan, so it is taken back out.
+		ms.removeKidCreatedFor(ctx, kidCreated, kid, projectId, realStore)
+		return "", errors.New("Something went wrong, Please try again.")
 	}
 	return jwt, nil
+}
+
+// removeKidCreatedFor undoes a key this call created, when what it was created for did not happen.
+// A key that already existed is left alone - other tokens may be signed with it.
+func (ms *ModuleStore) removeKidCreatedFor(ctx context.Context, kidCreated bool, kid string, projectId string, realStore ModuleStoreI) {
+	if !kidCreated {
+		return
+	}
+	if err := realStore.RemoveKid(ctx, kid, projectId, realStore); err != nil {
+		logs.WithContext(ctx).Error(fmt.Sprint("could not remove the key created for a token that was not saved : ", err.Error()))
+	}
 }
 
 func (ms *ModuleStore) RevokeApiToken(ctx context.Context, token_id string, realStore ModuleStoreI) (err error) {

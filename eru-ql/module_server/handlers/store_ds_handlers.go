@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -596,4 +597,145 @@ func validateReadDbConfigs(replicas []*module_model.ReadDbConfig) error {
 		}
 	}
 	return nil
+}
+
+// derivedFieldRequest carries everything a derived field save or validate needs.
+// The table and the field name live in the payload rather than the path so they
+// are stated exactly once.
+type derivedFieldRequest struct {
+	TableName     string `json:"table_name"`
+	PrevFieldName string `json:"prev_field_name,omitempty"`
+	common_types.DerivedFieldMetaData
+}
+
+// decodeDerivedFieldRequest reads the payload and normalises the table name.
+// Either separator is accepted: public.inv or public___inv.
+func decodeDerivedFieldRequest(r *http.Request) (req derivedFieldRequest, err error) {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&req); err != nil {
+		return req, err
+	}
+	req.TableName = strings.Replace(strings.TrimSpace(req.TableName), "___", ".", 1)
+	if req.TableName == "" {
+		return req, errors.New("table_name is mandatory")
+	}
+	if strings.TrimSpace(req.ColName) == "" {
+		return req, errors.New("col_name is mandatory")
+	}
+	return req, nil
+}
+
+func ProjectDataSourceSchemaSaveDerivedFieldHandler(sh *module_store.StoreHolder) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sh.Lock()
+		defer sh.Unlock()
+		logs.WithContext(r.Context()).Debug("ProjectDataSourceSchemaSaveDerivedFieldHandler - Start")
+		vars := mux.Vars(r)
+		projectId := vars["project"]
+		dbAlias := vars["dbalias"]
+
+		req, err := decodeDerivedFieldRequest(r)
+		if err != nil {
+			logs.WithContext(r.Context()).Error(err.Error())
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		if err = eru_utils.ValidateStruct(r.Context(), req.DerivedFieldMetaData, ""); err != nil {
+			logs.WithContext(r.Context()).Error(err.Error())
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": fmt.Sprint("missing field in object : ", err.Error())})
+			return
+		}
+
+		err = sh.Store.SaveDerivedField(r.Context(), projectId, vars["tenantId"], dbAlias, req.TableName, req.DerivedFieldMetaData, req.PrevFieldName, sh.Store)
+		if err != nil {
+			logs.WithContext(r.Context()).Error(err.Error())
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		} else {
+			server_handlers.FormatResponse(w, 200)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"msg": fmt.Sprint("Derived field ", req.ColName, " on ", req.TableName, " saved successfully")})
+		}
+		return
+	}
+}
+
+func ProjectDataSourceSchemaRemoveDerivedFieldHandler(sh *module_store.StoreHolder) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sh.Lock()
+		defer sh.Unlock()
+		logs.WithContext(r.Context()).Debug("ProjectDataSourceSchemaRemoveDerivedFieldHandler - Start")
+		vars := mux.Vars(r)
+		projectId := vars["project"]
+		dbAlias := vars["dbalias"]
+		tableName := vars["tablename"]
+		fieldName := vars["fieldname"]
+		tableName = strings.Replace(tableName, "___", ".", 1)
+
+		err := sh.Store.RemoveDerivedField(r.Context(), projectId, vars["tenantId"], dbAlias, tableName, fieldName, sh.Store)
+		if err != nil {
+			logs.WithContext(r.Context()).Error(err.Error())
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		} else {
+			server_handlers.FormatResponse(w, 200)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"msg": fmt.Sprint("Derived field ", fieldName, " on ", tableName, " removed successfully")})
+		}
+		return
+	}
+}
+
+func ProjectDataSourceGetDerivedFieldsHandler(sh *module_store.StoreHolder) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sh.Lock()
+		defer sh.Unlock()
+		logs.WithContext(r.Context()).Debug("ProjectDataSourceGetDerivedFieldsHandler - Start")
+		vars := mux.Vars(r)
+		projectId := vars["project"]
+		dbAlias := vars["dbalias"]
+		tableName := vars["tablename"]
+		tableName = strings.Replace(tableName, "___", ".", 1)
+
+		derivedFields, err := sh.Store.GetDerivedFields(r.Context(), projectId, vars["tenantId"], dbAlias, tableName)
+		if err != nil {
+			logs.WithContext(r.Context()).Error(err.Error())
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		} else {
+			server_handlers.FormatResponse(w, 200)
+			_ = json.NewEncoder(w).Encode(derivedFields)
+		}
+		return
+	}
+}
+
+func ProjectDataSourceSchemaValidateDerivedFieldHandler(sh *module_store.StoreHolder) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sh.Lock()
+		defer sh.Unlock()
+		logs.WithContext(r.Context()).Debug("ProjectDataSourceSchemaValidateDerivedFieldHandler - Start")
+		vars := mux.Vars(r)
+		projectId := vars["project"]
+		dbAlias := vars["dbalias"]
+
+		req, err := decodeDerivedFieldRequest(r)
+		if err != nil {
+			logs.WithContext(r.Context()).Error(err.Error())
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+
+		result, err := sh.Store.ValidateDerivedField(r.Context(), projectId, vars["tenantId"], dbAlias, req.TableName, req.DerivedFieldMetaData)
+		if err != nil {
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		} else {
+			server_handlers.FormatResponse(w, 200)
+			_ = json.NewEncoder(w).Encode(result)
+		}
+		return
+	}
 }

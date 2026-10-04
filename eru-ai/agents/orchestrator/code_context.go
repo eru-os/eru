@@ -47,27 +47,11 @@ type codeContext struct {
 	Attachments []string
 }
 
-// forwardableParams are the params whose whole purpose is to change the response
-// contract. A caller that sets one has already written the code to read the
-// result it produces, so a plan that quietly omits it is wrong even though every
-// step succeeds - which is exactly how an "output_mode: auto" request came back
-// as a single full page.
-var forwardableParams = []string{"output_mode", "inline_nested_pages", "base_revision", "scope", "page_id"}
-
-func isForwardableParam(name string) bool {
-	for _, candidate := range forwardableParams {
-		if candidate == name {
-			return true
-		}
-	}
-	return false
-}
-
 // callerForwardParams lists the request-shaping params present on the incoming
 // request, in a stable order.
 func callerForwardParams(params map[string]interface{}) []string {
 	out := []string{}
-	for _, name := range forwardableParams {
+	for _, name := range agents.ForwardableParams {
 		if value, ok := params[name]; ok && value != nil && value != "" {
 			out = append(out, name)
 		}
@@ -269,33 +253,18 @@ CHECKLIST ADDITION:
 }
 
 // forwardParamsSection tells the planner which request-shaping params the caller
-// set, and that every step reaching an agent that declares one must pass it on.
+// set and that it does not need to forward them: every agent it calls inherits
+// them through the call chain (agents.HeaderCallerParams).
 func (cc codeContext) forwardParamsSection(discovered []agents.DiscoveredAgent) string {
 	if len(cc.ForwardParams) == 0 {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString(`
-
-============================================================
-RULE #2d - THE CALLER SHAPED THE RESPONSE : FORWARD ITS PARAMS
-============================================================
-
-The caller set params that decide the SHAPE of the answer it gets back, not its
-content. It has already written the code that reads that shape, so a step that
-drops one of these silently answers in a protocol the caller did not ask for.
-
-`)
-	sb.WriteString(fmt.Sprint("Params the caller set: ", strings.Join(cc.ForwardParams, ", "), "\n\n"))
-	sb.WriteString("For EVERY agent step whose agent declares one of these params (check \"Params keys this agent READS\"),\n")
-	sb.WriteString("pass the caller's value straight through:\n")
-	for _, name := range cc.ForwardParams {
-		sb.WriteString(fmt.Sprint("  \"", name, "\": {{stringify .Vars.OrgBody.params.", name, "}}\n"))
-	}
-	sb.WriteString("\nAn agent that does not declare the param simply does not get it - never invent a value,\n")
-	sb.WriteString("and never substitute your own: forward exactly what the caller sent.\n")
+	sb.WriteString(fmt.Sprint("\n\nNOTE - the caller set response-shaping params: ", strings.Join(cc.ForwardParams, ", "), ".\n"))
+	sb.WriteString("Every agent you call that reads one of them receives the caller's value automatically. Do NOT add\n")
+	sb.WriteString("them to a step's params; only set one on a step when that step deliberately needs a DIFFERENT value.\n")
 	if capable := paramCapableAgents(discovered, cc.ForwardParams); len(capable) > 0 {
-		sb.WriteString(fmt.Sprint("Agents here that declare at least one of them: ", strings.Join(capable, ", "), "\n"))
+		sb.WriteString(fmt.Sprint("Agents here that read at least one of them: ", strings.Join(capable, ", "), "\n"))
 	}
 	return sb.String()
 }

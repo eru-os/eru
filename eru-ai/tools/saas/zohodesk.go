@@ -638,7 +638,7 @@ func init() {
 	tools.RegisterTool("ZOHODESK", func() tools.Tooling { return new(ZohoDeskTool) })
 	tools.RegisterToolCatalog(tools.ToolCatalogEntry{
 		Public:       true,
-		ToolType:     "ZohoDesk",
+		ToolType:     "ZOHODESK",
 		Category:     "SaaS",
 		Description:  "Zoho Desk integration for ticket management, organizations, and support operations",
 		Actions:      []tools.ActionInfo{{Name: GetTickets}, {Name: GetOrganizations}, {Name: GetTicketThread}, {Name: GetTicketContent}, {Name: GetTicketAttachment}, {Name: Login}, {Name: RenewToken}, {Name: GetSsoUrl}, {Name: StopAutoRenew}},

@@ -551,8 +551,14 @@ func (cs *CacheStore) SyncToDatabase(ctx context.Context, projectId string, cach
 	headers.Set("Content-Type", "application/json")
 
 	url := fmt.Sprintf("%s/graphql/%s/execute", strings.TrimSuffix(eruqlURL, "/"), projectId)
+	// Capped: a row can carry screenshots a client sent back, and the log is
+	// not where they belong.
 	b, _ := json.Marshal(requestBody)
-	logs.WithContext(ctx).Info(fmt.Sprintf("requestBody: %s", string(b)))
+	if len(b) > 2000 {
+		logs.WithContext(ctx).Info(fmt.Sprintf("requestBody (%d bytes, first 2000): %s", len(b), string(b[:2000])))
+	} else {
+		logs.WithContext(ctx).Info(fmt.Sprintf("requestBody: %s", string(b)))
+	}
 	_, _, _, statusCode, err := utils.CallHttp(ctx, "POST", url, headers, nil, nil, nil, requestBody)
 	if err != nil {
 		logs.WithContext(ctx).Error(fmt.Sprintf("Failed to sync cache data to database: %v", err))

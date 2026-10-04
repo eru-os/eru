@@ -87,7 +87,7 @@ func RegisterOAuthClientHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			writeOAuthError(w, r, auth.NewOAuthError(http.StatusNotFound, "invalid_request", "oauth server is not enabled"))
 			return
 		}
-		if !oAuthServer.ClientPolicy.AllowDynamicRegistration {
+		if !oAuthServer.EffectiveClientPolicy().AllowDynamicRegistration {
 			writeOAuthError(w, r, auth.NewOAuthError(http.StatusForbidden, "access_denied", "dynamic client registration is not enabled"))
 			return
 		}
@@ -102,7 +102,7 @@ func RegisterOAuthClientHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 		client.ClientId = ""
 		client.ClientSecret = ""
 
-		client, err = oAuthServer.ClientPolicy.ApplyPolicy(r.Context(), client)
+		client, err = oAuthServer.EffectiveClientPolicy().ApplyPolicy(r.Context(), client)
 		if err != nil {
 			writeOAuthError(w, r, err)
 			return
@@ -153,7 +153,7 @@ func OAuthClientSaveHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			return
 		}
 
-		client, err = authObj.OAuthServer(r.Context()).ClientPolicy.ApplyPolicy(r.Context(), client)
+		client, err = authObj.OAuthServer(r.Context()).EffectiveClientPolicy().ApplyPolicy(r.Context(), client)
 		if err != nil {
 			server_handlers.FormatResponse(w, 400)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})

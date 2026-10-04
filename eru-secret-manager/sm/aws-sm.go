@@ -327,10 +327,14 @@ func (awsSmStore *AwsSmStore) GetSmValue(ctx context.Context, projectId string, 
 		}
 		svOk := false
 		if secretValue, svOk = resultJson[secretKey]; svOk {
-			err = awsSmStore.CacheStore.Set(ctx, fmt.Sprint(secretName, "_", secretKey), secretValue)
-			if err != nil {
-				logs.WithContext(ctx).Error(err.Error())
-				err = nil // exit silently
+			// The cache is only set up on the cached path; a forced fetch may
+			// arrive before it exists.
+			if awsSmStore.CacheStore != nil {
+				err = awsSmStore.CacheStore.Set(ctx, fmt.Sprint(secretName, "_", secretKey), secretValue)
+				if err != nil {
+					logs.WithContext(ctx).Error(err.Error())
+					err = nil // exit silently
+				}
 			}
 			return secretValue, nil
 		} else {

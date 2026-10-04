@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
 	common_types "github.com/eru-os/eru/eru-ql/common_types"
 	parser "github.com/eru-os/eru/eru-ql/ds/parser"
+  "github.com/eru-os/eru/eru-ql/derived"
 
 	//eru_utils "github.com/eru-os/eru/eru-utils"
 
@@ -477,4 +479,147 @@ var postgresErutoDBDataTypeMapping = map[string]string{
 	"timewithzone":     "time with time zone",
 	"boolean":          "boolean",
 	"json":             "jsonb",
+}
+
+// RewriteDerivedFields replaces table-qualified references to derived fields
+// with their compiled expressions, in place, by offset. It runs before
+// secureSQL so the security wrapper sees the final table set - hop targets
+// included - and so cache tags taken from the executed SQL come out right.
+func (pr *PostgresSqlMaker) RewriteDerivedFields(ctx context.Context, req DerivedRewriteRequest) (string, error) {
+	logs.WithContext(ctx).Debug("RewriteDerivedFields - Start")
+	if len(req.DataSource.DerivedFields) == 0 {
+		return req.Query, nil
+	}
+
+	is := antlr.NewInputStream(req.Query)
+	lexer := parser.NewPostgreSQLLexer(is)
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPostgreSQLParser(stream)
+	tree := p.Root()
+
+	refs := extractColumnRefs(tree)
+	if len(refs) == 0 {
+		return req.Query, nil
+	}
+
+	scope, err := derivedScope(ctx, tree, req.Query, pr)
+	if err != nil {
+		return "", err
+	}
+
+	dialect := pr.GetCalcDialect(ctx)
+	limits := req.Limits.WithDefaults()
+	fieldCount := 0
+	aggHops := 0
+
+	// Splice right-to-left so earlier offsets stay valid.
+	sort.Slice(refs, func(i int, j int) bool { return refs[i].Start > refs[j].Start })
+
+	query := req.Query
+	for _, ref := range refs {
+		table, resolved := scope[strings.ToLower(ref.Qualifier)]
+		if !resolved {
+			// a CTE, a derived table, or a qualifier we do not manage
+			continue
+		}
+		if table == "" {
+			return "", errors.New(fmt.Sprint("qualifier ", ref.Qualifier, " refers to more than one table in this statement - derived field ", ref.Qualifier, ".", ref.ColName, " cannot be resolved here"))
+		}
+		// a real column of the same name always wins
+		if _, isColumn := req.DataSource.SchemaTables[table][ref.ColName]; isColumn {
+			continue
+		}
+		df, isDerived := req.DataSource.DerivedFields[table][ref.ColName]
+		if !isDerived {
+			continue
+		}
+
+		compiled, cErr := derived.Compile(derived.CompileRequest{
+			Schema: derived.Schema{
+				Tables:  req.DataSource.SchemaTables,
+				Derived: req.DataSource.DerivedFields,
+				Joins:   req.DataSource.DerivedHopLookup(ctx),
+			},
+			Table:          table,
+			Field:          df,
+			Dialect:        dialect,
+			OuterAlias:     ref.Qualifier,
+			AllowHops:      true,
+			MaxInlineDepth: limits.MaxInlineDepth,
+			Security:       req.Security,
+		})
+		if cErr != nil {
+			return "", cErr
+		}
+
+		fieldCount = fieldCount + 1
+		aggHops = aggHops + compiled.AggregateHops
+		if fieldCount > limits.MaxFieldsPerQuery {
+			return "", errors.New(fmt.Sprint("this query references ", fieldCount, " derived fields, the limit is ", limits.MaxFieldsPerQuery))
+		}
+		if aggHops > limits.MaxAggregateHops {
+			return "", errors.New(fmt.Sprint("this query needs ", aggHops, " aggregate subqueries, the limit is ", limits.MaxAggregateHops))
+		}
+		for _, w := range compiled.Warnings {
+			logs.WithContext(ctx).Warn(fmt.Sprint(table, ".", ref.ColName, ": ", w))
+		}
+
+		if ref.Start < 0 || ref.Stop > len(query) || ref.Start > ref.Stop {
+			return "", errors.New(fmt.Sprint("cannot splice derived field ", ref.Qualifier, ".", ref.ColName, " - offsets out of range"))
+		}
+		query = fmt.Sprint(query[:ref.Start], compiled.Expr, query[ref.Stop:])
+	}
+
+	if fieldCount > 0 {
+		logs.WithContext(ctx).Info(fmt.Sprint("rewrote ", fieldCount, " derived field reference(s)"))
+	}
+	return query, nil
+}
+
+// derivedScope maps each alias in the statement to the schema-qualified table it
+// names. An alias used for two different tables maps to "" so the caller fails
+// loudly rather than resolving it against the wrong one; a CTE name is left out
+// entirely so references through it are passed through untouched.
+func derivedScope(ctx context.Context, tree antlr.Tree, query string, pr *PostgresSqlMaker) (map[string]string, error) {
+	ctes := make(map[string]bool)
+	for _, alias := range extractAliasNames(tree) {
+		ctes[strings.ToLower(strings.TrimSpace(alias))] = true
+	}
+
+	scope := make(map[string]string)
+	for _, t := range extractTableAliasNames(tree, query).Tables {
+		alias := strings.ToLower(strings.TrimSpace(t.AliasName))
+		table := strings.TrimSpace(t.TableName)
+		if alias == "" || table == "" {
+			continue
+		}
+		if ctes[strings.ToLower(table)] || ctes[alias] {
+			continue
+		}
+		if !strings.Contains(table, ".") {
+			table = fmt.Sprint(pr.DefaultSchemaName(), table)
+		}
+		addAlias(scope, alias, table)
+		// An unaliased schema-qualified table can also be referred to by its
+		// bare name: "from public.inv" makes "inv.col" legal.
+		if alias == strings.ToLower(strings.TrimSpace(t.TableName)) {
+			if i := strings.LastIndex(alias, "."); i >= 0 {
+				addAlias(scope, alias[i+1:], table)
+			}
+		}
+	}
+	return scope, nil
+}
+
+// addAlias records alias -> table, mapping to "" when one alias names two
+// different tables so the caller fails loudly instead of guessing.
+func addAlias(scope map[string]string, alias string, table string) {
+	if alias == "" {
+		return
+	}
+	if existing, seen := scope[alias]; seen && existing != table {
+		scope[alias] = ""
+		return
+	}
+	scope[alias] = table
 }

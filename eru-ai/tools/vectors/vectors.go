@@ -294,7 +294,7 @@ func init() {
 	tools.RegisterTool("VECTORSTORE", func() tools.Tooling { return new(VectorstoreAccount) })
 	tools.RegisterToolCatalog(tools.ToolCatalogEntry{
 		Public:      false,
-		ToolType:    "Vectorstore",
+		ToolType:    "VECTORSTORE",
 		Category:    "AI",
 		Description: "Vector store operations for semantic search and AI embedding storage",
 		Actions: func() []tools.ActionInfo {

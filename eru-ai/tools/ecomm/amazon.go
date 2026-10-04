@@ -1194,7 +1194,7 @@ func init() {
 	tools.RegisterTool("AMAZON", func() tools.Tooling { return new(AmazonTool) })
 	tools.RegisterToolCatalog(tools.ToolCatalogEntry{
 		Public:       true,
-		ToolType:     "Amazon",
+		ToolType:     "AMAZON",
 		Category:     "Ecommerce",
 		Description:  "Amazon Selling Partner API for orders, financials, and account management",
 		Actions:      []tools.ActionInfo{{Name: GetOrders}, {Name: GetOrderItems}, {Name: GetFinancialEvents}, {Name: GetFinancialEventGroups}, {Name: Login}, {Name: RenewToken}, {Name: GetSsoUrl}, {Name: StopAutoRenew}},

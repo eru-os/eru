@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -134,20 +135,26 @@ func sqlAuthoringAgent(allowedAgents []agents.DiscoveredAgent) string {
 	return ""
 }
 
-// containsLiteralSQL reports a statement typed into the template rather than
-// referenced from somewhere. It looks for the verb and its companion keyword so
-// that prose mentioning "select" in a content string does not trip it.
-func containsLiteralSQL(template string) bool {
-	upper := strings.ToUpper(template)
-	pairs := [][2]string{
-		{"SELECT ", " FROM "},
-		{"INSERT ", " INTO "},
-		{"UPDATE ", " SET "},
-		{"DELETE ", " FROM "},
+// literalSQLPatterns match the shape of a statement, not just its keywords:
+// "multi-select filter writes its selection ... from" is prose that happens to
+// hold SELECT and FROM, and rejecting the plan over it cost a planning round.
+// A select list is comma-separated expressions, never a run of bare words.
+var literalSQLPatterns = func() []*regexp.Regexp {
+	ident := `[\w."` + "`" + `]+`
+	item := `(?:` + ident + `|\*)(?:\([^)]*\))?(?:\s+AS\s+\w+)?`
+	return []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bSELECT\s+(?:DISTINCT\s+)?` + item + `(?:\s*,\s*` + item + `)*\s+FROM\s+` + ident),
+		regexp.MustCompile(`(?i)\bINSERT\s+INTO\s+` + ident + `\s*(?:\(|VALUES\b|SELECT\b)`),
+		regexp.MustCompile(`(?i)\bUPDATE\s+` + ident + `\s+SET\s+` + ident + `\s*=`),
+		regexp.MustCompile(`(?i)\bDELETE\s+FROM\s+` + ident + `(?:\s+WHERE\b|\s*;|\s*["'` + "`" + `]|\s*$)`),
 	}
-	for _, pair := range pairs {
-		at := strings.Index(upper, pair[0])
-		if at >= 0 && strings.Contains(upper[at:], pair[1]) {
+}()
+
+// containsLiteralSQL reports a statement typed into the template rather than
+// referenced from somewhere.
+func containsLiteralSQL(template string) bool {
+	for _, pattern := range literalSQLPatterns {
+		if pattern.MatchString(template) {
 			return true
 		}
 	}
@@ -198,45 +205,34 @@ func validateClarificationForwarding(steps map[string]*functions.FuncStep, allow
 	return issues
 }
 
-// validateParamForwarding holds the plan to the response shape the caller asked
-// for. A param like output_mode decides which protocol the answer arrives in;
-// when the caller sets it and the target agent reads it, a step that does not
-// forward it succeeds while answering in the wrong shape - the failure mode that
-// looks like the feature was never built.
+// validateParamForwarding catches a forwarded param that would arrive in the
+// wrong shape. The caller's params reach every agent through the call chain on
+// their own; a step only names one to override it, and inside a dict wrapping
+// it in stringify encodes it twice - the agent receives "\"auto\"", which
+// matches no mode, and that explicit value beats the inherited one.
 func validateParamForwarding(steps map[string]*functions.FuncStep, allowedAgents []agents.DiscoveredAgent, cc codeContext) []planIssue {
-	if len(cc.ForwardParams) == 0 || len(allowedAgents) == 0 {
+	if len(cc.ForwardParams) == 0 {
 		return nil
 	}
-	byName := map[string]agents.DiscoveredAgent{}
-	for _, agent := range allowedAgents {
-		byName[agent.AgentName] = agent
-	}
-
 	var issues []planIssue
 	walkSteps(steps, "", func(stepPath string, stepKey string, step *functions.FuncStep) {
 		if step.AgentName == "" {
 			return
 		}
-		agent, known := byName[step.AgentName]
-		if !known {
+		template := step.TransformRequest
+		if !strings.HasPrefix(strings.TrimSpace(template), "{{") {
 			return
 		}
-		template := step.TransformRequest
 		for _, name := range cc.ForwardParams {
-			if !containsString(agent.ParamKeys(), name) {
-				continue
+			if strings.Contains(template, "(stringify .Vars.OrgBody.params."+name+")") {
+				issues = append(issues, planIssue{
+					StepPath: stepPath,
+					Field:    "transform_request",
+					Template: template,
+					Err: fmt.Sprint("params.", name, " is wrapped in stringify inside a dict, so the agent receives it JSON-encoded twice. ",
+						"The agent inherits the caller's ", name, " automatically - remove it from this step, or inside dict pass the value itself: \"", name, "\" .Vars.OrgBody.params.", name),
+				})
 			}
-			if strings.Contains(template, name) {
-				continue
-			}
-			issues = append(issues, planIssue{
-				StepPath: stepPath,
-				Field:    "transform_request",
-				Template: template,
-				Err: fmt.Sprint("the caller set params.", name, " and agent \"", step.AgentName,
-					"\" reads it, but this step does not forward it - the agent would answer in a different shape than the caller asked for. ",
-					"Add it to the step's params: \"", name, "\": {{stringify .Vars.OrgBody.params.", name, "}}"),
-			})
 		}
 	})
 	return issues

@@ -1321,7 +1321,7 @@ func init() {
 	tools.RegisterTool("SLACK", func() tools.Tooling { return new(SlackTool) })
 	tools.RegisterToolCatalog(tools.ToolCatalogEntry{
 		Public:       true,
-		ToolType:     "Slack",
+		ToolType:     "SLACK",
 		Category:     "Communication",
 		Description:  "Slack integration for messaging, channels, and webhooks",
 		Actions:      []tools.ActionInfo{{Name: SendMessage}, {Name: ReadMessages}, {Name: Login}, {Name: GetSsoUrl}, {Name: SubscribeWebhooks}, {Name: ListChannels}, {Name: ListUsers}, {Name: CreateChannel}, {Name: InviteToChannel}, {Name: JoinChannel}, {Name: UploadMedia}, {Name: DownloadMedia}, {Name: Callback}},

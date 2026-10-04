@@ -275,6 +275,9 @@ func (sqlObj *SQLObjectM) processMutationDoc(ctx context.Context, d interface{},
 		mr[i] = module_model.MutationRecord{}
 		colNo := 1
 		for k, kv := range insertDoc {
+			if _, dfOk := datasource.DerivedFields[parentTableName][k]; dfOk {
+				return nil, errors.New(fmt.Sprint(k, " is a derived field on ", parentTableName, " - it is calculated at read time and cannot be inserted or updated"))
+			}
 			if i == 0 && !sqlObj.NestedDoc { // picking up columns only from first record in array as structure of all records should be same for non nested docs
 				colsIfNotNested = append(colsIfNotNested, k)
 			}
@@ -402,7 +405,7 @@ func (sqlObj *SQLObjectM) processMutationDoc(ctx context.Context, d interface{},
 func (sqlObj *SQLObjectM) MakeMutationQuery(ctx context.Context, doc *module_model.MutationRecord, tableName string, sqlMaker ds.SqlMakerI) {
 	logs.WithContext(ctx).Debug("MakeMutationQuery - Start")
 	returningStr := ""
-	strWhereClause, e := processWhereClause(ctx, sqlObj.WhereClause, "", sqlObj.MainTableName, false, false)
+	strWhereClause, e := processWhereClause(ctx, sqlObj.WhereClause, "", sqlObj.MainTableName, false, false, nil)
 	if e != "" {
 		logs.WithContext(ctx).Error(e)
 		//TODO to return errors to main result

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
+	agents "github.com/eru-os/eru/eru-ai/agents"
 	tools "github.com/eru-os/eru/eru-ai/tools"
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
 	eru_models "github.com/eru-os/eru/eru-models"
@@ -50,6 +52,10 @@ func AskUserToolSchema() eru_models.JSONSchema {
 			"multi_select":    {Type: "boolean", Description: "true if more than one option may be selected"},
 			"free_text_label": {Type: "string", Description: "Label for the free-text input (e.g. 'Something else'). The user can always type an answer; this only names the box."},
 			"required":        {Type: "boolean", Description: "true if the user must answer this question"},
+			"input_type": {Type: "string", Enum: []interface{}{"text", "secret", "oauth"},
+				Description: "secret for any credential (API key, password, client secret, private key, token). The user types it into a masked field, the client saves it as a secret, and you receive only its $SECRET_<name> reference - never the value. Never ask for a credential as text."},
+			"secret_name": {Type: "string", Description: "For input_type secret: the name to save the secret under, lowercase with underscores, e.g. payments_prod_api_key. Make it unique to this connection."},
+			"tool_name":   {Type: "string", Description: "For input_type oauth: the saved connection the user must authorize. The client shows an Authorize button; the answer is \"authorized\" once they finish."},
 		},
 		Required: []string{"question"},
 	}
@@ -150,6 +156,9 @@ type askUserQuestion struct {
 	AllowFreeText bool            `json:"allow_free_text"`
 	FreeTextLabel string          `json:"free_text_label,omitempty"`
 	Required      bool            `json:"required,omitempty"`
+	InputType     string          `json:"input_type,omitempty"`
+	SecretName    string          `json:"secret_name,omitempty"`
+	ToolName      string          `json:"tool_name,omitempty"`
 }
 
 type askUserRequest struct {
@@ -189,6 +198,22 @@ func normalizeClarificationRequest(params map[string]interface{}) (map[string]in
 		// thought of is exactly the one the user needs to be able to state - and
 		// that is the case where the option list is most likely to be wrong.
 		q.AllowFreeText = true
+		if q.InputType == agents.InputTypeOAuth {
+			if strings.TrimSpace(q.ToolName) == "" {
+				return nil, fmt.Errorf("ask_user question %d is input_type oauth but names no tool_name", i+1)
+			}
+			cq := agents.ClarificationQuestion{InputType: q.InputType}
+			agents.NormalizeOAuthQuestion(&cq)
+			q.Options = []askUserOption{{Value: cq.Options[0].Value, Label: cq.Options[0].Label}}
+			q.MultiSelect, q.AllowFreeText, q.FreeTextLabel, q.Required = false, false, "", true
+			continue
+		}
+		if q.InputType == agents.InputTypeSecret {
+			cq := agents.ClarificationQuestion{Id: q.Id, InputType: q.InputType, SecretName: q.SecretName}
+			agents.NormalizeSecretQuestion(&cq)
+			q.Options, q.MultiSelect, q.FreeTextLabel, q.SecretName = nil, false, cq.FreeTextLabel, cq.SecretName
+			continue
+		}
 		if q.FreeTextLabel == "" {
 			q.FreeTextLabel = defaultFreeTextLabel
 		}
@@ -220,7 +245,7 @@ func init() {
 	tools.RegisterTool("ASK_USER", func() tools.Tooling { return new(AskUserTool) })
 	tools.RegisterToolCatalog(tools.ToolCatalogEntry{
 		Public:       false,
-		ToolType:     "AskUser",
+		ToolType:     "ASK_USER",
 		Category:     "Utility",
 		Description:  "Human-in-the-loop clarification: agent asks the user multiple-choice questions with a free-text fallback",
 		Actions:      []tools.ActionInfo{{Name: AskUserToolName}},

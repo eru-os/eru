@@ -30,6 +30,9 @@ type JSONSchema struct {
 	Format               string                `json:"format,omitempty"` // For strings
 	Description          string                `json:"description,omitempty"`
 	AdditionalProperties interface{}           `json:"additionalProperties,omitempty"`
+	// WriteOnly marks a credential: it is sent when saving and never read back.
+	// Set from a `secret:"true"` struct tag.
+	WriteOnly bool `json:"writeOnly,omitempty"`
 }
 type SampleRequest struct {
 	RequestId    string                 `json:"request_id" eru:"required"`

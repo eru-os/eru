@@ -237,30 +237,31 @@ func UnMarshalStore(ctx context.Context, b []byte, msi ModuleStoreI) error {
 					logs.WithContext(ctx).Error(err.Error())
 					return err
 				}
-				for _, authJson := range auths {
+				// One auth that this build cannot read must not take the rest of the store with it.
+				// Auth types are registered per binary - a build without an auth type's package does
+				// not know that type - and returning here left every project after
+				// this one unloaded, in whichever order the map happened to iterate.
+				for authName, authJson := range auths {
 					var authObj map[string]*json.RawMessage
-					err = json.Unmarshal(*authJson, &authObj)
-					if err != nil {
-						logs.WithContext(ctx).Error(err.Error())
-						return err
+					if authErr := json.Unmarshal(*authJson, &authObj); authErr != nil {
+						logs.WithContext(ctx).Error(fmt.Sprint("skipping auth ", authName, " of project ", prj, " - it could not be read : ", authErr.Error()))
+						continue
 					}
 					var authType string
 					if at, ok := authObj["auth_type"]; ok {
-						err = json.Unmarshal(*at, &authType)
-						if err != nil {
-							logs.WithContext(ctx).Error(err.Error())
-							return err
+						if authErr := json.Unmarshal(*at, &authType); authErr != nil {
+							logs.WithContext(ctx).Error(fmt.Sprint("skipping auth ", authName, " of project ", prj, " - auth_type could not be read : ", authErr.Error()))
+							continue
 						}
 					}
 					authI := authtype.GetAuth(authType)
-					err = authI.MakeFromJson(ctx, authJson)
-					if err == nil {
-						err = msi.SaveAuth(ctx, authI, prj, msi, false)
-						if err != nil {
-							return err
-						}
-					} else {
-						return err
+					if authErr := authI.MakeFromJson(ctx, authJson); authErr != nil {
+						logs.WithContext(ctx).Error(fmt.Sprint("skipping auth ", authName, " of project ", prj, " - auth type ", authType, " is not available in this build : ", authErr.Error()))
+						continue
+					}
+					if authErr := msi.SaveAuth(ctx, authI, prj, msi, false); authErr != nil {
+						logs.WithContext(ctx).Error(fmt.Sprint("skipping auth ", authName, " of project ", prj, " - it could not be saved : ", authErr.Error()))
+						continue
 					}
 				}
 			}

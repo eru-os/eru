@@ -1379,7 +1379,7 @@ func init() {
 	tools.RegisterTool("GL_EMAIL", func() tools.Tooling { return new(GlEmailTool) })
 	tools.RegisterToolCatalog(tools.ToolCatalogEntry{
 		Public:       true,
-		ToolType:     "GlEmail",
+		ToolType:     "GL_EMAIL",
 		Category:     "Communication",
 		Description:  "Google (Gmail) email integration for reading, sending, and subscribing to emails via Gmail API and Pub/Sub",
 		Actions:      []tools.ActionInfo{{Name: ReadEmail}, {Name: SendEmail}, {Name: SubscribeEmail}, {Name: ReadMessage}, {Name: GetSsoUrl}, {Name: Login}, {Name: RenewToken}, {Name: RenewSubscription}, {Name: ReadHistoryRange}},

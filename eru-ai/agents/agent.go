@@ -96,6 +96,12 @@ type ClarificationQuestion struct {
 	AllowFreeText bool             `json:"allow_free_text"`
 	FreeTextLabel string           `json:"free_text_label,omitempty"`
 	Required      bool             `json:"required,omitempty"`
+	// InputType "secret" asks for a credential. The client saves the typed
+	// value as a secret itself and answers with only the reference.
+	InputType  string `json:"input_type,omitempty"`
+	SecretName string `json:"secret_name,omitempty"`
+	// ToolName names the connection an "oauth" question asks the user to authorize.
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 type QuestionOption struct {
@@ -107,6 +113,9 @@ type ClarificationAnswer struct {
 	QuestionId string   `json:"question_id"`
 	Selected   []string `json:"selected,omitempty"`
 	FreeText   string   `json:"free_text,omitempty"`
+	// SecretRef answers a secret question: $SECRET_<name> of the secret the
+	// client saved. The value itself never comes back.
+	SecretRef string `json:"secret_ref,omitempty"`
 }
 
 // ConversationListItem is one row of the conversation list: enough to show it
@@ -704,6 +713,9 @@ func (agent *Agent) ExecuteFuncGroup(ctx context.Context, funcGroup functions.Fu
 	if target, ok := GetStreamTarget(ctx); ok {
 		headers.Set(HeaderStreamId, target.StreamId)
 		headers.Set(HeaderStreamCallback, target.CallbackUrl)
+	}
+	if encoded := EncodeCallerParams(OutgoingCallerParams(ctx, agentMessage.Params)); encoded != "" {
+		headers.Set(HeaderCallerParams, encoded)
 	}
 	r := &http.Request{
 		Method:        "POST",

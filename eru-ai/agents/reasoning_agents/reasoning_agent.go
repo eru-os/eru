@@ -36,6 +36,7 @@ When you ask:
 - For each question provide 2-4 concrete, mutually exclusive options (value + human label).
 - The user can always type their own answer instead of picking an option - that is added for you. So options are the likely answers, not the only ones: never write an option meaning "none of these", and never tell the user their situation is not covered.
 - Set multi_select=true only when more than one option can legitimately be chosen.
+- For a credential (API key, password, client secret, private key, token) ask with input_type "secret" and a secret_name. You get back only a $SECRET_<name> reference: put that reference in the config field. Never ask the user to type a credential as text or in chat, and never repeat one.
 Calling ask_user ends your turn; the user's answers will arrive as a follow-up message in the same conversation, after which you continue.`
 
 func (ra *ReasoningAgent) GetSpec() agents.AgentI {
@@ -130,6 +131,8 @@ func (ra *ReasoningAgent) Execute(ctx context.Context, agentMessage agents.Agent
 				resumeContext = agents.ResumeContextFrom(qa.Action)
 			}
 		}
+		agents.ScrubSecretAnswers(&agentMessage, req)
+		answers, _ = agentMessage.ClarificationAnswers()
 		answerText := agents.FormatAnswersForModel(req, answers)
 		// Hand back the lookups the agent had already made before it asked, so
 		// answering a question resumes the work instead of restarting it.
@@ -365,6 +368,7 @@ func (ra *ReasoningAgent) Execute(ctx context.Context, agentMessage agents.Agent
 	// Every rejection's shape, so a fault the agent has already been shown and
 	// already "fixed" is recognised when it comes back.
 	faults := newFaultTrail()
+	reviewRounds := 0
 	for {
 		// Before the attempt, not after it: checking afterwards means always
 		// paying for the call that crosses the line, and on tokens and minutes
@@ -451,6 +455,45 @@ func (ra *ReasoningAgent) Execute(ctx context.Context, agentMessage agents.Agent
 		}
 		if valErr == nil {
 			agents.EmitStepFinished(ctx, agents.StepValidate, attempt+1, agents.OutcomeSuccess, validationStarted, "", "")
+
+			// The answer passed every rule. If the agent type can look at it -
+			// have the client render it - it does so now, and a defect it sees
+			// buys one more attempt. The reviewed answer is held first, so a
+			// revision that does worse never costs the user the answer they had.
+			if reviewer, ok := ra.GetProvider().(agents.OutputReviewer); ok && reviewer != nil && reviewRounds < agents.MaxReviewRounds {
+				review, reviewed := reviewer.ReviewOutput(ctx, agentResponse, reviewRounds)
+				if reviewed && (review.Findings != nil || (reviewRounds == 0 && len(review.Files) > 0)) {
+					shipped = &acceptedAnswer{response: response, traces: traces, output: agentResponse}
+					prompt := review.Prompt
+					if review.Findings != nil {
+						if repairer, ok := ra.GetProvider().(agents.OutputRepairer); ok && repairer != nil {
+							if turn, repairable := repairer.RepairTurn(ctx, agentResponse, review.Findings); repairable {
+								if turn.Schema.Type != "" && outputTool != nil {
+									outputSchema = turn.Schema
+									outputTool.SetAttribute(ctx, "output_schema", outputSchema)
+									outputTool.SetAttribute(ctx, "parameters", outputSchema)
+								}
+								if strings.TrimSpace(turn.Prompt) != "" {
+									prompt = strings.TrimSpace(prompt + "\n\n" + turn.Prompt)
+								}
+							}
+						}
+						if !strings.Contains(prompt, review.Findings.Error()) {
+							prompt = strings.TrimSpace(prompt + "\n\n" + review.Findings.Error())
+						}
+					}
+					logs.WithContext(ctx).Info(fmt.Sprintf("agent %s review round %d: findings=%v screenshots=%d", ra.AgentName, reviewRounds+1, review.Findings != nil, len(review.Files)))
+					chatRequest.Messages = append(chatRequest.Messages, models.Message{
+						Role:    "user",
+						Content: prompt,
+						Name:    ra.AgentName,
+						Files:   review.Files,
+					})
+					reviewRounds++
+					attempt++
+					continue
+				}
+			}
 
 			// The answer is well formed. The remaining question is whether it is
 			// any good, and no rule in this package can answer that.

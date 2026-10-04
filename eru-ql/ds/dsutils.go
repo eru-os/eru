@@ -123,3 +123,53 @@ func extractTableNames(tree antlr.Tree) (tableNames []string) {
 	}
 	return tableNames
 }
+
+// extractColumnRefs collects every table-qualified column reference in the
+// statement, with the offsets of the whole reference. Same tree the table/alias
+// walk above uses.
+func extractColumnRefs(tree antlr.Tree) (refs []module_model.ColumnRefInQuery) {
+	switch ctx := tree.(type) {
+	case *parser.ColumnrefContext:
+		if ref, ok := columnRefFrom(ctx); ok {
+			refs = append(refs, ref)
+		}
+		// a column reference has no nested column references
+	default:
+		for i := 0; i < tree.GetChildCount(); i++ {
+			refs = append(refs, extractColumnRefs(tree.GetChild(i))...)
+		}
+	}
+	return refs
+}
+
+// columnRefFrom accepts only the exactly-two-part form: one qualifier, one
+// attribute name. inv.* and inv.col[1] are left alone.
+func columnRefFrom(ctx *parser.ColumnrefContext) (ref module_model.ColumnRefInQuery, ok bool) {
+	colid := ctx.Colid()
+	indirection := ctx.Indirection()
+	if colid == nil || indirection == nil {
+		return ref, false
+	}
+	indirectionCtx, isCtx := indirection.(*parser.IndirectionContext)
+	if !isCtx {
+		return ref, false
+	}
+	els := indirectionCtx.AllIndirection_el()
+	if len(els) != 1 {
+		return ref, false
+	}
+	el, isEl := els[0].(*parser.Indirection_elContext)
+	if !isEl {
+		return ref, false
+	}
+	attr := el.Attr_name()
+	if attr == nil || el.STAR() != nil {
+		return ref, false
+	}
+	return module_model.ColumnRefInQuery{
+		Qualifier: strings.TrimSpace(colid.GetText()),
+		ColName:   strings.TrimSpace(attr.GetText()),
+		Start:     ctx.GetStart().GetStart(),
+		Stop:      ctx.GetStop().GetStop() + 1,
+	}, true
+}

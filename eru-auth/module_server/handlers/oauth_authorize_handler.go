@@ -54,7 +54,7 @@ func AuthorizeHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			return
 		}
 
-		authRequest, err := auth.ValidateAuthorizationRequest(r.Context(), r.URL.Query(), client, oAuthServer.ClientPolicy)
+		authRequest, err := auth.ValidateAuthorizationRequest(r.Context(), r.URL.Query(), client, oAuthServer.EffectiveClientPolicy())
 		if err != nil {
 			// Once the redirect uri is known to be registered, protocol errors belong back at the
 			// client. Before that they are rendered, so an unverified uri is never redirected to.

@@ -618,6 +618,18 @@ func ToolSaveHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			}
 		}
 		logs.WithContext(r.Context()).Info(fmt.Sprint(toolType))
+		if schema, ok := catalogSchema(toolType); ok {
+			if bad := literalSecretFields(schema, toolObjTmp, ""); len(bad) > 0 {
+				server_handlers.FormatResponse(w, 400)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": fmt.Sprint("credential fields must hold a secret reference like $SECRET_<name>, not the value: ", strings.Join(bad, ", "))})
+				return
+			}
+		}
+		if err := registerSecretRefs(r.Context(), sh.Store, projectId, tenantId, secretRefs(toolObjTmp)); err != nil {
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
 		toolObj := tools_factory.GetTool(toolType)
 		logs.WithContext(r.Context()).Info(fmt.Sprint(toolObj))
 		toolJson, err := json.Marshal(toolObjTmp)
@@ -781,6 +793,7 @@ func AgentExecuteHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 			return
 		}
+		agents.ScrubSecretAnswers(&agentMessage, agents.ClarificationRequest{})
 		if conversationId == "" {
 			conversationId = uuid.New().String()
 		}
@@ -789,6 +802,20 @@ func AgentExecuteHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 		}
 		r = r.WithContext(module_store.WithProjectContext(r.Context(), projectId, sh.Store))
 		r = r.WithContext(agents.WithAgentChain(r.Context(), chain))
+		// A sub-agent inherits the response shape its original caller asked for.
+		// The plan that called it does not have to repeat those params; the ones
+		// this agent reads are filled in where the step left them out.
+		if inherited := agents.DecodeCallerParams(r.Header.Get(agents.HeaderCallerParams)); len(inherited) > 0 {
+			r = r.WithContext(agents.WithCallerParams(r.Context(), inherited))
+			declared := module_store.AgentInputSchema(r.Context(), agent).Properties[agents.AgentInputParamsKey].Properties
+			names := make([]string, 0, len(declared))
+			for name := range declared {
+				names = append(names, name)
+			}
+			if filled := agents.InheritCallerParams(&agentMessage, inherited, names); len(filled) > 0 {
+				logs.WithContext(r.Context()).Info(fmt.Sprint("agent ", agentName, " inherited caller params: ", strings.Join(filled, ", ")))
+			}
+		}
 		if isRaw {
 			logs.WithContext(r.Context()).Info(fmt.Sprint("AgentExecuteHandler - raw output requested for agent ", agentName))
 			r = r.WithContext(agents.WithRawOutput(r.Context(), true))

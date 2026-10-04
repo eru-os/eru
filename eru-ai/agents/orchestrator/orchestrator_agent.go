@@ -194,6 +194,12 @@ func (oa *OrchestratorAgent) Execute(ctx context.Context, agentMessage agents.Ag
 	if oa.EnableClarification {
 		if answers, ok := agentMessage.ClarificationAnswers(); ok {
 			pendingMsg, qa, found := agents.PendingQuestion(conversation)
+			if found {
+				if pending, perr := agents.ParseClarificationRequest(qa.Action); perr == nil {
+					agents.ScrubSecretAnswers(&agentMessage, pending)
+					answers, _ = agentMessage.ClarificationAnswers()
+				}
+			}
 			// A checkpoint is worth resuming when it has a step waiting to run OR
 			// pages waiting on a yes/no. Requiring a paused branch dropped the
 			// page question on the floor: the answer was appended to the message
@@ -377,7 +383,12 @@ func (oa *OrchestratorAgent) Execute(ctx context.Context, agentMessage agents.Ag
 				ResVarsJSON: marshalVars(extractResVars(funcVarsMap)),
 				PagesToSave: pages,
 			}
-			return oa.emitClarification(ctx, pageSaveRequest(pages), &pending, allTraces, agentMessage, conversation, projectId, tenantId)
+			// The pages travel with the question. Asked alone, "save these?" left
+			// the client with nothing to draw: the page appeared while it streamed
+			// and vanished when the answer - a bare question - arrived, so there
+			// was nothing to review before choosing.
+			return oa.emitClarification(ctx, pageSaveRequest(pages), &pending, allTraces, agentMessage, conversation, projectId, tenantId,
+				oa.collectClientOutputs(ctx, decompositionResult, funcVarsMap, executionResult)...)
 		}
 	}
 
@@ -504,7 +515,7 @@ func (oa *OrchestratorAgent) planEventData(ctx context.Context, plan map[string]
 // orchestration until the user answers in the same conversation. When pending
 // is non-nil the resume checkpoint is stored on the message so the next turn
 // can resume only the remaining steps.
-func (oa *OrchestratorAgent) emitClarification(ctx context.Context, req agents.ClarificationRequest, pending *PendingResume, traces []models.StepTrace, agentMessage agents.AgentMessage, conversation *agents.Conversation, projectId string, tenantId string) (agents.AgentMessage, error) {
+func (oa *OrchestratorAgent) emitClarification(ctx context.Context, req agents.ClarificationRequest, pending *PendingResume, traces []models.StepTrace, agentMessage agents.AgentMessage, conversation *agents.Conversation, projectId string, tenantId string, alongside ...agents.AgentOutputAction) (agents.AgentMessage, error) {
 	streamCb := agents.GetStreamCallback(ctx)
 	if streamCb != nil {
 		action := req.ToAction(oa.AgentName)
@@ -513,7 +524,7 @@ func (oa *OrchestratorAgent) emitClarification(ctx context.Context, req agents.C
 
 	agentOutput := agents.AgentMessage{
 		Role:             "assistant",
-		Actions:          []agents.AgentOutputAction{req.ToAction(oa.AgentName)},
+		Actions:          append([]agents.AgentOutputAction{req.ToAction(oa.AgentName)}, alongside...),
 		Traces:           traces,
 		MessageId:        agentMessage.MessageId,
 		MessageTimestamp: time.Now(),
@@ -833,7 +844,6 @@ func (oa *OrchestratorAgent) repairPlan(ctx context.Context, agentMessage agents
 		// compiled here, before anything is validated, so the rest of the
 		// pipeline only ever sees a plan with real templates in it.
 		issues := compileStepRequests(plan)
-		autoForwardParams(plan, oa.discoveredAgents, cc)
 		issues = append(issues, validatePlan(ctx, plan, oa.discoveredAgents, oa.discoveredTools, cc)...)
 		if strings.EqualFold(oa.DelegationStrategy, StrategySequential) {
 			issues = append(issues, validateSequentialPlan(plan)...)

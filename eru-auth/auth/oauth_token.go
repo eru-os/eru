@@ -32,6 +32,12 @@ type TokenSignerI interface {
 	SignToken(ctx context.Context, projectId string, kid string, claims map[string]interface{}) (string, error)
 }
 
+// TokenVerifierI validates a token this server signed, against the key named in its header. A
+// signer that can also verify saves the userinfo path a round trip to our own published key set.
+type TokenVerifierI interface {
+	VerifyToken(ctx context.Context, projectId string, token string) (map[string]interface{}, error)
+}
+
 // TokenResponse is the RFC 6749 token endpoint response.
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
@@ -63,21 +69,26 @@ type TokenService struct {
 
 func (config OAuthServerConfig) accessTokenLifespan() int {
 	if config.AccessTokenLifespan > 0 {
-		return config.AccessTokenLifespan
+		return config.AccessTokenLifespan.Seconds()
 	}
 	return defaultAccessTokenLifespan
 }
 
 func (config OAuthServerConfig) idTokenLifespan() int {
 	if config.IdTokenLifespan > 0 {
-		return config.IdTokenLifespan
+		return config.IdTokenLifespan.Seconds()
 	}
 	return defaultIdTokenLifespan
 }
 
+// RefreshTokenLifespanSeconds is how long a refresh token, and the cookie carrying it, are good for.
+func (config OAuthServerConfig) RefreshTokenLifespanSeconds() int {
+	return config.refreshTokenLifespan()
+}
+
 func (config OAuthServerConfig) refreshTokenLifespan() int {
 	if config.RefreshTokenLifespan > 0 {
-		return config.RefreshTokenLifespan
+		return config.RefreshTokenLifespan.Seconds()
 	}
 	return defaultRefreshTokenLifespan
 }
@@ -251,6 +262,9 @@ func (service TokenService) signToken(ctx context.Context, claims map[string]int
 }
 
 func (service TokenService) newRefreshToken(ctx context.Context, grantId string, clientId string, identityId string, scope string) (string, error) {
+	if err := service.Flow.requireConnection(ctx); err != nil {
+		return "", err
+	}
 	refreshToken, err := randomToken()
 	if err != nil {
 		logs.WithContext(ctx).Error(err.Error())

@@ -73,7 +73,7 @@ func (config OAuthServerConfig) SessionLifespanSeconds() int {
 
 func (config OAuthServerConfig) sessionLifespan() int {
 	if config.SessionLifespan > 0 {
-		return config.SessionLifespan
+		return config.SessionLifespan.Seconds()
 	}
 	return defaultSessionLifespan
 }

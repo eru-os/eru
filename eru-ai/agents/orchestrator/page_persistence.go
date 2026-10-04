@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -32,7 +33,7 @@ const pageSaveNo = "Leave them unsaved"
 // not a page and is left alone.
 func collectGeneratedPages(resVars map[string]*functions.TemplateVars) []map[string]interface{} {
 	var found []map[string]interface{}
-	seen := map[string]bool{}
+	index := map[string]int{}
 
 	var walk func(v interface{})
 	walk = func(v interface{}) {
@@ -49,9 +50,18 @@ func collectGeneratedPages(resVars map[string]*functions.TemplateVars) []map[str
 				if strings.TrimSpace(id) == "" {
 					id, _ = def["id"].(string)
 				}
-				if id = strings.TrimSpace(id); id != "" && !seen[id] {
-					seen[id] = true
-					found = append(found, map[string]interface{}{"page_id": id, "page": def})
+				// A result names the same page more than once - the full page in
+				// its envelope, and small references to it ({"page": {"id",
+				// "name"}}) elsewhere. Keeping whichever the walk met first meant
+				// a reference could be saved over the real page, wiping every
+				// component on it. The richest definition wins.
+				if id = strings.TrimSpace(id); id != "" {
+					if at, dup := index[id]; !dup {
+						index[id] = len(found)
+						found = append(found, map[string]interface{}{"page_id": id, "page": def})
+					} else if pageWeight(def) > pageWeight(found[at]["page"].(map[string]interface{})) {
+						found[at] = map[string]interface{}{"page_id": id, "page": def}
+					}
 				}
 			}
 			for _, child := range node {
@@ -74,7 +84,41 @@ func collectGeneratedPages(resVars map[string]*functions.TemplateVars) []map[str
 			walk(resVars[k].Body)
 		}
 	}
-	return found
+	kept := found[:0]
+	for _, page := range found {
+		if def, _ := page["page"].(map[string]interface{}); isRenderablePage(def) {
+			kept = append(kept, page)
+		}
+	}
+	return kept
+}
+
+// isRenderablePage reports a page definition that carries a components list -
+// a page, possibly empty. A definition without one is a reference to a page
+// ({"id", "name"}), never a page to save.
+func isRenderablePage(def map[string]interface{}) bool {
+	if def == nil {
+		return false
+	}
+	_, ok := def["components"].([]interface{})
+	return ok
+}
+
+// pageWeight ranks candidate definitions of one page: a renderable page beats a
+// reference, and a larger one beats a smaller.
+func pageWeight(def map[string]interface{}) int {
+	if def == nil {
+		return 0
+	}
+	encoded, _ := json.Marshal(def)
+	weight := len(encoded)
+	if components, _ := def["components"].([]interface{}); len(components) > 0 {
+		weight += 1 << 29
+	}
+	if isRenderablePage(def) {
+		weight += 1 << 30
+	}
+	return weight
 }
 
 // pageName is what the page calls itself, falling back to its id.
@@ -268,6 +312,13 @@ func (oa *OrchestratorAgent) savePages(ctx context.Context, pages []map[string]i
 		id, _ := page["page_id"].(string)
 		def, _ := page["page"].(map[string]interface{})
 		name := pageName(page)
+		// Last line of defence: saving a definition with no components
+		// replaces the stored page with an empty one.
+		if !isRenderablePage(def) {
+			logs.WithContext(ctx).Error(fmt.Sprintf("refusing to save page %s: the definition has no components", id))
+			report = append(report, fmt.Sprintf("%s was NOT saved: what was produced for it has no components, and saving it would have emptied the page.", name))
+			continue
+		}
 		// page_def travels as an object. Sent as a string it persists as {}.
 		_, _, saveErr := delegate.Execute(ctx, projectId, tenantId, "save_page", map[string]interface{}{
 			"org_id":     orgId,

@@ -524,6 +524,59 @@ func (eruAuth *EruAuth) Login(ctx context.Context, loginPostBody LoginPostBody, 
 	return identity, LoginSuccess{}, nil
 }
 
+// GetUser reads an identity by id. EruAuth had no implementation, so it fell through to the stub
+// that reports "not implemented" - which meant anything needing the current identity of an already
+// authenticated user, such as refreshing a token, could not get it.
+func (eruAuth *EruAuth) GetUser(ctx context.Context, userId string) (identity Identity, err error) {
+	logs.WithContext(ctx).Debug("GetUser - Start")
+	if eruAuth.AuthDb == nil || eruAuth.AuthDb.GetConn() == nil {
+		err = errors.New("no database connection is set on this auth")
+		logs.WithContext(ctx).Error(err.Error())
+		return Identity{}, err
+	}
+
+	identityQuery := models.Queries{}
+	identityQuery.Query = eruAuth.AuthDb.GetDbQuery(ctx, SELECT_IDENTITY)
+	identityQuery.Vals = append(identityQuery.Vals, userId)
+	identityQuery.Rank = 1
+
+	identityOutput, err := utils.ExecuteDbFetch(ctx, eruAuth.AuthDb.GetConn(), identityQuery)
+	if err != nil {
+		logs.WithContext(ctx).Error(err.Error())
+		return Identity{}, errors.New("something went wrong - please try again")
+	}
+	if len(identityOutput) == 0 {
+		err = errors.New("user not found")
+		logs.WithContext(ctx).Info(err.Error())
+		return Identity{}, err
+	}
+
+	return eruIdentityFromRow(identityOutput[0]), nil
+}
+
+// eruIdentityFromRow maps a row of eruauth_identities the way the login path does: traits and
+// attributes are flattened together into Attributes, which is the shape everything downstream reads.
+func eruIdentityFromRow(row map[string]interface{}) (identity Identity) {
+	if id, idOk := row["identity_id"].(string); idOk {
+		identity.Id = id
+	}
+	if status, statusOk := row["status"].(string); statusOk {
+		identity.Status = status
+	}
+	identity.Attributes = make(map[string]interface{})
+	if attrs, attrsOk := row["attributes"].(*map[string]interface{}); attrsOk && attrs != nil {
+		for k, v := range *attrs {
+			identity.Attributes[k] = v
+		}
+	}
+	if traits, traitsOk := row["traits"].(*map[string]interface{}); traitsOk && traits != nil {
+		for k, v := range *traits {
+			identity.Attributes[k] = v
+		}
+	}
+	return identity
+}
+
 func (eruAuth *EruAuth) GenerateRecoveryCode(ctx context.Context, recoveryIdentifier RecoveryPostBody, projectId string, silentFlag bool) (msg string, err error) {
 	logs.WithContext(ctx).Debug("GenerateRecoveryCode - Start")
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -12,6 +13,7 @@ import (
 	"github.com/eru-os/eru/eru-cache/cache"
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
 	common_types "github.com/eru-os/eru/eru-ql/common_types"
+  "github.com/eru-os/eru/eru-ql/derived"
 	sqlengine "github.com/eru-os/eru/eru-ql/sql_engine"
 	eru_writes "github.com/eru-os/eru/eru-read-write/eru_writes"
 	"github.com/eru-os/eru/eru-secret-manager/sm"
@@ -53,6 +55,15 @@ type TablesInQuery struct {
 	Tables []TableInQuery
 }
 
+// ColumnRefInQuery is one table-qualified column reference in a statement, with
+// the byte offsets of the whole reference so it can be spliced.
+type ColumnRefInQuery struct {
+	Qualifier string
+	ColName   string
+	Start     int
+	Stop      int
+}
+
 type ModuleProjectI interface {
 	CompareProject(ctx context.Context, compareProject ExtendedProject) (StoreCompare, error)
 }
@@ -77,6 +88,9 @@ type StoreCompare struct {
 	DeleteTableTransformation   []string               `json:"delete_table_transformation"`
 	NewTableTransformation      []string               `json:"new_table_transformation"`
 	MismatchTableTransformation map[string]interface{} `json:"mismatch_table_transformation"`
+	DeleteDerivedFields         []string               `json:"delete_derived_fields"`
+	NewDerivedFields            []string               `json:"new_derived_fields"`
+	MismatchDerivedFields       map[string]interface{} `json:"mismatch_derived_fields"`
 }
 
 type ExtendedProject struct {
@@ -100,7 +114,34 @@ type TenantConfig struct {
 	MyQueries   map[string]*MyQuery    `json:"my_queries"`   //queryName is key
 }
 type ProjectSettings struct {
-	ClaimsKey string `json:"claims_key" eru:"required"`
+	ClaimsKey          string             `json:"claims_key" eru:"required"`
+	DerivedFieldLimits DerivedFieldLimits `json:"derived_field_limits" eru:"optional"`
+}
+
+// DerivedFieldLimits caps what one query may ask the database to do on behalf of
+// derived fields. Tunable per deployment; zero means use the default.
+type DerivedFieldLimits struct {
+	MaxFieldsPerQuery int `json:"max_derived_fields_per_query" eru:"optional"`
+	MaxAggregateHops  int `json:"max_aggregate_hops_per_query" eru:"optional"`
+	MaxInlineDepth    int `json:"max_derived_inline_depth" eru:"optional"`
+}
+
+func DefaultDerivedFieldLimits() DerivedFieldLimits {
+	return DerivedFieldLimits{MaxFieldsPerQuery: 10, MaxAggregateHops: 3, MaxInlineDepth: derived.DefaultMaxInlineDepth}
+}
+
+func (l DerivedFieldLimits) WithDefaults() DerivedFieldLimits {
+	d := DefaultDerivedFieldLimits()
+	if l.MaxFieldsPerQuery <= 0 {
+		l.MaxFieldsPerQuery = d.MaxFieldsPerQuery
+	}
+	if l.MaxAggregateHops <= 0 {
+		l.MaxAggregateHops = d.MaxAggregateHops
+	}
+	if l.MaxInlineDepth <= 0 {
+		l.MaxInlineDepth = d.MaxInlineDepth
+	}
+	return l
 }
 
 /*
@@ -166,28 +207,29 @@ type QueryCacheConfig struct {
 }
 
 type DataSource struct {
-	ProjectId                  string                                               `json:"-"`
-	DbAlias                    string                                               `json:"db_alias" eru:"required"`
-	DbType                     string                                               `json:"db_type" eru:"required"`
-	DbName                     string                                               `json:"db_name" eru:"required"`
-	DbConfig                   DbConfig                                             `json:"db_config" eru:"optional"`
-	ResolvedDbConfig           DbConfig                                             `json:"-" eru:"optional"`
-	IcebergConfig              IcebergConfig                                        `json:"iceberg_config" eru:"optional"`
-	SqlEngine                  sqlengine.SQLEngineI                                 `json:"sql_engine"`
-	SchemaTables               map[string]map[string]common_types.TableColsMetaData `json:"schema_tables"` //tableName is the key
-	OtherTables                map[string]map[string]common_types.TableColsMetaData `json:"other_tables"`  //tableName is the key
-	SchemaTablesSecurity       map[string]SecurityRules                             `json:"schema_tables_security"`
-	SchemaTablesTransformation map[string]TransformRules                            `json:"schema_tables_transformation"`
-	TableJoins                 map[string]*TableJoins                               `json:"table_joins"`
-	Con                        *sqlx.DB                                             `json:"-"`
-	ConStatus                  bool                                                 `json:"con_status"`
-	ReadDbConfigs              []*ReadDbConfig                                      `json:"read_db_configs" eru:"optional"`
-	ReadPolicy                 ReadPolicy                                           `json:"read_policy" eru:"optional"`
-	ReadCounter                uint64                                               `json:"-"`
-	DbSecurityRules            SecurityRules                                        `json:"db_security_rules"`
-	QueryCache                 cache.CacheStoreI                                    `json:"query_cache"`
-	QueryCacheClone            cache.CacheStoreI                                    `json:"-"`
-	QueryCacheConfig           QueryCacheConfig                                     `json:"query_cache_config"`
+	ProjectId                  string                                                  `json:"-"`
+	DbAlias                    string                                                  `json:"db_alias" eru:"required"`
+	DbType                     string                                                  `json:"db_type" eru:"required"`
+	DbName                     string                                                  `json:"db_name" eru:"required"`
+	DbConfig                   DbConfig                                                `json:"db_config" eru:"optional"`
+	ResolvedDbConfig           DbConfig                                                `json:"-" eru:"optional"`
+	IcebergConfig              IcebergConfig                                           `json:"iceberg_config" eru:"optional"`
+	SqlEngine                  sqlengine.SQLEngineI                                    `json:"sql_engine"`
+	SchemaTables               map[string]map[string]common_types.TableColsMetaData    `json:"schema_tables"`  //tableName is the key
+	OtherTables                map[string]map[string]common_types.TableColsMetaData    `json:"other_tables"`   //tableName is the key
+	DerivedFields              map[string]map[string]common_types.DerivedFieldMetaData `json:"derived_fields"` //tableName is the key
+	SchemaTablesSecurity       map[string]SecurityRules                                `json:"schema_tables_security"`
+	SchemaTablesTransformation map[string]TransformRules                               `json:"schema_tables_transformation"`
+	TableJoins                 map[string]*TableJoins                                  `json:"table_joins"`
+	Con                        *sqlx.DB                                                `json:"-"`
+	ConStatus                  bool                                                    `json:"con_status"`
+	ReadDbConfigs              []*ReadDbConfig                                         `json:"read_db_configs" eru:"optional"`
+	ReadPolicy                 ReadPolicy                                              `json:"read_policy" eru:"optional"`
+	ReadCounter                uint64                                                  `json:"-"`
+	DbSecurityRules            SecurityRules                                           `json:"db_security_rules"`
+	QueryCache                 cache.CacheStoreI                                       `json:"query_cache"`
+	QueryCacheClone            cache.CacheStoreI                                       `json:"-"`
+	QueryCacheConfig           QueryCacheConfig                                        `json:"query_cache_config"`
 }
 
 type ReadDbConfig struct {
@@ -523,6 +565,85 @@ func (ds *DataSource) GetTableJoins(ctx context.Context, parentTableName string,
 	return tj, nil
 }
 
+// DerivedHopLookup resolves a derived field's relationship hops from the
+// configured joins only. A derived field travels a join an operator defined for
+// exactly this pair of tables - never an indirect path GetTableJoins might find,
+// and never anything a client claimed.
+func (ds *DataSource) DerivedHopLookup(ctx context.Context) derived.HopLookup {
+	return func(ownTable string, targetTable string) (derived.Hop, error) {
+		_, direct := ds.TableJoins[fmt.Sprint(ownTable, "___", targetTable)]
+		_, reverse := ds.TableJoins[fmt.Sprint(targetTable, "___", ownTable)]
+		if !direct && !reverse {
+			return derived.Hop{}, errors.New(fmt.Sprint("no join defined between ", ownTable, " and ", targetTable))
+		}
+		// GetTableJoins normalises the pair so table 1 is the parent we asked
+		// about and table 2 the target.
+		tj, err := ds.GetTableJoins(ctx, ownTable, targetTable, make(map[string]string))
+		if err != nil {
+			return derived.Hop{}, err
+		}
+		if !tj.IsActive {
+			return derived.Hop{}, errors.New(fmt.Sprint("the join between ", ownTable, " and ", targetTable, " is not active"))
+		}
+		if len(tj.ComplexCondition) > 0 {
+			return derived.Hop{}, errors.New(fmt.Sprint("the join between ", ownTable, " and ", targetTable, " carries a complex condition - a derived field cannot travel it"))
+		}
+		if len(tj.Table1Cols) == 0 || len(tj.Table1Cols) != len(tj.Table2Cols) {
+			return derived.Hop{}, errors.New(fmt.Sprint("the join between ", ownTable, " and ", targetTable, " has mismatched keys"))
+		}
+		return derived.Hop{TargetTable: targetTable, OwnCols: tj.Table1Cols, TargetCols: tj.Table2Cols}, nil
+	}
+}
+
+// DerivedFieldsUsingJoin returns the derived fields whose hops travel the join
+// between the two tables, as "table.field".
+func (ds *DataSource) DerivedFieldsUsingJoin(table1 string, table2 string) (users []string) {
+	for tbl, fields := range ds.DerivedFields {
+		for name, df := range fields {
+			for _, hop := range df.CalcJoins {
+				if (tbl == table1 && hop.TargetTable == table2) || (tbl == table2 && hop.TargetTable == table1) {
+					users = append(users, fmt.Sprint(tbl, ".", name))
+				}
+			}
+		}
+	}
+	sort.Strings(users)
+	return users
+}
+
+// DerivedFieldsHoppingTo returns the derived fields on other tables whose hops
+// reach the given table, as "table.field".
+func (ds *DataSource) DerivedFieldsHoppingTo(targetTable string) (users []string) {
+	for tbl, fields := range ds.DerivedFields {
+		if tbl == targetTable {
+			continue
+		}
+		for name, df := range fields {
+			for _, hop := range df.CalcJoins {
+				if hop.TargetTable == targetTable {
+					users = append(users, fmt.Sprint(tbl, ".", name))
+				}
+			}
+		}
+	}
+	sort.Strings(users)
+	return users
+}
+
+// DerivedFieldsUsingColumn returns the derived fields on a table that read the
+// given column, as "table.field".
+func (ds *DataSource) DerivedFieldsUsingColumn(tableName string, colName string) (users []string) {
+	for name, df := range ds.DerivedFields[tableName] {
+		for _, dep := range df.CalcDeps {
+			if dep == colName {
+				users = append(users, fmt.Sprint(tableName, ".", name))
+			}
+		}
+	}
+	sort.Strings(users)
+	return users
+}
+
 func (ds *DataSource) AddTableJoins(ctx context.Context, tj *TableJoins) {
 	logs.WithContext(ctx).Debug("AddTableJoins - Start")
 	tempKey := fmt.Sprint(tj.Table1Name, "___", tj.Table2Name)
@@ -614,7 +735,7 @@ func (prj *ExtendedProject) CompareProject(ctx context.Context, compareProject E
 		for _, cd := range compareProject.DataSources {
 			if md.DbAlias == cd.DbAlias {
 				dsFound = true
-				if !cmp.Equal(md, cd, cmpopts.IgnoreFields(DataSource{}, "Con", "ReadCounter", "ResolvedDbConfig", "SchemaTables", "SchemaTablesTransformation", "TableJoins"), cmpopts.IgnoreFields(ReadDbConfig{}, "Con", "ConStatus", "ResolvedDbConfig"), cmpopts.IgnoreFields(common_types.TableColsMetaData{}, "ColPosition"), cmp.Reporter(&diffR)) {
+				if !cmp.Equal(md, cd, cmpopts.IgnoreFields(DataSource{}, "Con", "ReadCounter", "ResolvedDbConfig", "SchemaTables", "SchemaTablesTransformation", "TableJoins", "DerivedFields"), cmpopts.IgnoreFields(ReadDbConfig{}, "Con", "ConStatus", "ResolvedDbConfig"), cmpopts.IgnoreFields(common_types.TableColsMetaData{}, "ColPosition"), cmp.Reporter(&diffR)) {
 					if storeCompare.MismatchDataSources == nil {
 						storeCompare.MismatchDataSources = make(map[string]interface{})
 					}
@@ -717,6 +838,31 @@ func (prj *ExtendedProject) CompareProject(ctx context.Context, compareProject E
 					}
 				}
 
+				for mTblKey, mTbl := range md.DerivedFields {
+					for mdfKey, mdf := range mTbl {
+						var diffDf utils.DiffReporter
+						dfKey := fmt.Sprint(mTblKey, ".", mdfKey)
+						cdf, dfFound := cd.DerivedFields[mTblKey][mdfKey]
+						if !dfFound {
+							storeCompare.DeleteDerivedFields = append(storeCompare.DeleteDerivedFields, dfKey)
+							continue
+						}
+						if !cmp.Equal(mdf, cdf, cmpopts.IgnoreFields(common_types.DerivedFieldMetaData{}, "ColPosition"), cmp.Reporter(&diffDf)) {
+							if storeCompare.MismatchDerivedFields == nil {
+								storeCompare.MismatchDerivedFields = make(map[string]interface{})
+							}
+							storeCompare.MismatchDerivedFields[dfKey] = diffDf.Output()
+						}
+					}
+				}
+				for cTblKey, cTbl := range cd.DerivedFields {
+					for cdfKey, _ := range cTbl {
+						if _, dfFound := md.DerivedFields[cTblKey][cdfKey]; !dfFound {
+							storeCompare.NewDerivedFields = append(storeCompare.NewDerivedFields, fmt.Sprint(cTblKey, ".", cdfKey))
+						}
+					}
+				}
+
 				for mstKey, mst := range md.TableJoins {
 					var diffSt utils.DiffReporter
 					stFound := false
@@ -795,22 +941,23 @@ func (ds *DataSource) UnmarshalJSON(b []byte) error {
 	logs.Logger.Info("DataSource UnmarshalJSON - Start")
 	ctx := context.Background()
 	type TempDataSource struct {
-		DbAlias                    string                                               `json:"db_alias"`
-		DbType                     string                                               `json:"db_type"`
-		DbName                     string                                               `json:"db_name"`
-		DbConfig                   DbConfig                                             `json:"db_config"`
-		IcebergConfig              IcebergConfig                                        `json:"iceberg_config"`
-		SqlEngineType              string                                               `json:"sql_engine_type"`
-		SchemaTables               map[string]map[string]common_types.TableColsMetaData `json:"schema_tables"`
-		OtherTables                map[string]map[string]common_types.TableColsMetaData `json:"other_tables"`
-		SchemaTablesSecurity       map[string]SecurityRules                             `json:"schema_tables_security"`
-		SchemaTablesTransformation map[string]TransformRules                            `json:"schema_tables_transformation"`
-		TableJoins                 map[string]*TableJoins                               `json:"table_joins"`
-		ConStatus                  bool                                                 `json:"con_status"`
-		ReadDbConfigs              []*ReadDbConfig                                      `json:"read_db_configs"`
-		ReadPolicy                 ReadPolicy                                           `json:"read_policy"`
-		DbSecurityRules            SecurityRules                                        `json:"db_security_rules"`
-		QueryCacheConfig           QueryCacheConfig                                     `json:"query_cache_config"`
+		DbAlias                    string                                                  `json:"db_alias"`
+		DbType                     string                                                  `json:"db_type"`
+		DbName                     string                                                  `json:"db_name"`
+		DbConfig                   DbConfig                                                `json:"db_config"`
+		IcebergConfig              IcebergConfig                                           `json:"iceberg_config"`
+		SqlEngineType              string                                                  `json:"sql_engine_type"`
+		SchemaTables               map[string]map[string]common_types.TableColsMetaData    `json:"schema_tables"`
+		OtherTables                map[string]map[string]common_types.TableColsMetaData    `json:"other_tables"`
+		DerivedFields              map[string]map[string]common_types.DerivedFieldMetaData `json:"derived_fields"`
+		SchemaTablesSecurity       map[string]SecurityRules                                `json:"schema_tables_security"`
+		SchemaTablesTransformation map[string]TransformRules                               `json:"schema_tables_transformation"`
+		TableJoins                 map[string]*TableJoins                                  `json:"table_joins"`
+		ConStatus                  bool                                                    `json:"con_status"`
+		ReadDbConfigs              []*ReadDbConfig                                         `json:"read_db_configs"`
+		ReadPolicy                 ReadPolicy                                              `json:"read_policy"`
+		DbSecurityRules            SecurityRules                                           `json:"db_security_rules"`
+		QueryCacheConfig           QueryCacheConfig                                        `json:"query_cache_config"`
 	}
 	var tempDs TempDataSource
 	if err := json.Unmarshal(b, &tempDs); err != nil {
@@ -824,6 +971,7 @@ func (ds *DataSource) UnmarshalJSON(b []byte) error {
 	ds.IcebergConfig = tempDs.IcebergConfig
 	ds.SchemaTables = tempDs.SchemaTables
 	ds.OtherTables = tempDs.OtherTables
+	ds.DerivedFields = tempDs.DerivedFields
 	ds.SchemaTablesSecurity = tempDs.SchemaTablesSecurity
 	ds.SchemaTablesTransformation = tempDs.SchemaTablesTransformation
 	ds.TableJoins = tempDs.TableJoins

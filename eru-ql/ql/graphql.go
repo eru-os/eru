@@ -259,11 +259,7 @@ func (gqd *GraphQLData) Execute(ctx context.Context, projectId string, datasourc
 
 				if gqd.GroupBy.Active {
 					gqd.SetGroupByColMap(groupByColMap(sqlObj.Columns))
-					groupQuery, gErr := gqd.wrapGroupBy(ctx, sqlObj.DBQuery)
-					if gErr != nil {
-						return nil, nil, gErr
-					}
-					groupQuery, gErr = gqd.wrapQuery(ctx, groupQuery, graphQLs[i])
+					groupQuery, gErr := gqd.wrapQuery(ctx, sqlObj.DBQuery, graphQLs[i])
 					if gErr != nil {
 						return nil, nil, gErr
 					}
@@ -882,7 +878,7 @@ func getTableSecurityRule(ctx context.Context, projectId string, tenantId string
 				er = logs.Err(ctx, er, "")
 				return "", nil, er
 			}
-			oc, _ := processWhereClause(ctx, onClause, "", mainTableName, true, false)
+			oc, _ := processWhereClause(ctx, onClause, "", mainTableName, true, false, nil)
 			ctjObjMap[ctj] = oc
 		}
 		var ptables []string
@@ -917,7 +913,7 @@ func getTableSecurityRule(ctx context.Context, projectId string, tenantId string
 						er = logs.Err(ctx, er, "")
 						return "", nil, er
 					}
-					oc, _ := processWhereClause(ctx, onClause, "", p, true, false)
+					oc, _ := processWhereClause(ctx, onClause, "", p, true, false, nil)
 					q = fmt.Sprint(q, " left join ", srJoin, " on ", oc)
 				}
 				q = fmt.Sprint(q, " where ", ro)

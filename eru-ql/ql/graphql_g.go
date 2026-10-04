@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
+  "github.com/eru-os/eru/eru-ql/derived"
 	"github.com/eru-os/eru/eru-ql/ds"
 	"github.com/eru-os/eru/eru-ql/module_model"
 	"github.com/eru-os/eru/eru-ql/module_store"
@@ -39,6 +40,11 @@ type SQLObjectQ struct {
 	queryLevel      int
 	querySubLevel   []int
 	DBQuery         string
+  derivedCount       int
+	derivedAggHops     int
+	derivedLimitsCache *module_model.DerivedFieldLimits
+	derivedResolve     derivedExprResolver
+	derivedErr         string
 	OverwriteDoc    map[string]map[string]interface{} `json:"-"`
 	SecurityClause  map[string]string                 `json:"-"`
 	WithQuery       string                            `json:"-"`
@@ -129,6 +135,7 @@ func (sqlObj *SQLObjectQ) ProcessGraphQL(ctx context.Context, sel ast.Selection,
 		}
 	}
 	sqlObj.Columns = sqlCols
+	sqlObj.derivedResolve = sqlObj.newDerivedExprResolver(ctx, qualifyTableKey("", sqlObj.MainTableName, sqlMaker), unqualifiedTableName(sqlObj.MainTableName), datasource, sqlMaker, s)
 	err = sqlObj.MakeQuery(ctx, sqlMaker, withColAlias)
 	logs.WithContext(ctx).Info(fmt.Sprint("query  : ", sqlObj.DBQuery))
 	return err
@@ -291,7 +298,37 @@ func (sqlObj *SQLObjectQ) processColumnList(ctx context.Context, sel []ast.Selec
 		} else {
 			tn = tableName
 		}
-		if !strings.Contains(val, ".") {
+		isDerived := false
+		if colName != "" {
+			derivedTable := qualifyTableKey(colTableName, tableName, sqlMaker)
+			if df, dfOk := datasource.DerivedFields[derivedTable][colName]; dfOk {
+				outerAlias := colTableName
+				if outerAlias == "" {
+					outerAlias = tn
+				}
+				cf, cErr := sqlObj.compileDerivedField(ctx, derivedTable, derived.CompileRequest{
+					Schema: derived.Schema{
+						Tables:  datasource.SchemaTables,
+						Derived: datasource.DerivedFields,
+						Joins:   datasource.DerivedHopLookup(ctx),
+					},
+					Table:          derivedTable,
+					Field:          df,
+					Dialect:        sqlMaker.GetCalcDialect(ctx),
+					OuterAlias:     outerAlias,
+					AllowHops:      true,
+					MaxInlineDepth: sqlObj.derivedLimits(ctx, s).MaxInlineDepth,
+					Security:       sqlObj.securedSourceFor(ctx, datasource, s),
+				}, s)
+				if cErr != nil {
+					logs.WithContext(ctx).Error(cErr.Error())
+					return SQLCols{}, cErr.Error()
+				}
+				val = cf.Expr
+				isDerived = true
+			}
+		}
+		if !isDerived && !strings.Contains(val, ".") {
 			val = fmt.Sprint(tn, ".", val)
 		}
 		for _, a := range field.Arguments { //TODO where clause for inner tables
@@ -314,6 +351,11 @@ func (sqlObj *SQLObjectQ) processColumnList(ctx context.Context, sel []ast.Selec
 				sqlObj.JoinClause = append(sqlObj.JoinClause, &om)
 
 			case "calc":
+				if isDerived {
+					cErr := errors.New(fmt.Sprint(colName, " is a derived field and cannot also carry a calc argument"))
+					logs.WithContext(ctx).Error(cErr.Error())
+					return SQLCols{}, cErr.Error()
+				}
 				v, err := ParseAstValue(ctx, a.Value, vars)
 				if err != nil {
 					logs.WithContext(ctx).Error(err.Error())
@@ -425,7 +467,7 @@ func (sqlObj *SQLObjectQ) processColumnList(ctx context.Context, sel []ast.Selec
 	return sqlCols, err
 }
 
-func processWhereClause(ctx context.Context, val interface{}, parentKey string, mainTableName string, isJoinClause bool, jsonOp bool) (whereClause string, err string) { //, gqr *graphQLRead
+func processWhereClause(ctx context.Context, val interface{}, parentKey string, mainTableName string, isJoinClause bool, jsonOp bool, resolveDerived derivedExprResolver) (whereClause string, err string) { //, gqr *graphQLRead
 	logs.WithContext(ctx).Debug("processWhereClause - Start")
 
 	if val != nil {
@@ -436,6 +478,8 @@ func processWhereClause(ctx context.Context, val interface{}, parentKey string, 
 		} else if !(strings.Contains(parentKey, ".")) {
 			if jsonOp {
 				parentKey = fmt.Sprint(mainTableName, "->>'", parentKey, "'")
+			} else if expr, isDerived := resolveDerivedName(resolveDerived, parentKey); isDerived {
+				parentKey = expr
 			} else {
 				parentKey = fmt.Sprint(mainTableName, ".", parentKey)
 			}
@@ -481,7 +525,7 @@ func processWhereClause(ctx context.Context, val interface{}, parentKey string, 
 							s := reflect.ValueOf(newVal)
 							innerTempArray := make([]string, s.Len())
 							for ii := 0; ii < s.Len(); ii++ {
-								innerTempArray[ii], err = processWhereClause(ctx, s.Index(ii).Interface(), v, mainTableName, isJoinClause, jsonOp)
+								innerTempArray[ii], err = processWhereClause(ctx, s.Index(ii).Interface(), v, mainTableName, isJoinClause, jsonOp, resolveDerived)
 								if err != "" {
 									return "", err
 								}
@@ -491,7 +535,7 @@ func processWhereClause(ctx context.Context, val interface{}, parentKey string, 
 							logs.WithContext(ctx).Info(fmt.Sprint("json operator found for :", parentKey))
 							logs.WithContext(ctx).Info(fmt.Sprint(newVal))
 							str := ""
-							str, err = processWhereClause(ctx, newVal, "", parentKey, isJoinClause, true)
+							str, err = processWhereClause(ctx, newVal, "", parentKey, isJoinClause, true, resolveDerived)
 							if str == "" {
 								logs.WithContext(ctx).Warn(fmt.Sprint("skipping whereclause for ", newVal, " as there is no value provided by user  : ", str))
 							} else {
@@ -654,7 +698,7 @@ func processWhereClause(ctx context.Context, val interface{}, parentKey string, 
 								}
 							default:
 								str := ""
-								str, err = processWhereClause(ctx, newVal, eru_utils.ReplaceUnderscoresWithDots(v), mainTableName, isJoinClause, jsonOp)
+								str, err = processWhereClause(ctx, newVal, eru_utils.ReplaceUnderscoresWithDots(v), mainTableName, isJoinClause, jsonOp, resolveDerived)
 								if str == "" {
 									logs.WithContext(ctx).Warn(fmt.Sprint("skipping whereclause for ", newVal, " as there is no value provided by user  : ", str))
 								} else {
@@ -769,6 +813,8 @@ func (sqlObj *SQLObjectQ) processSortClause(ctx context.Context, val interface{}
 						}
 						if strings.Contains(ss, ".") {
 							temp = append(temp, ss+isDesc)
+						} else if expr, isDerived := resolveDerivedName(sqlObj.resolveDerived, ss); isDerived {
+							temp = append(temp, fmt.Sprint(expr, isDesc))
 						} else {
 							temp = append(temp, fmt.Sprintf("%s%s%s%s", sqlObj.MainTableName, ".", ss, isDesc))
 						}
@@ -788,6 +834,8 @@ func (sqlObj *SQLObjectQ) processSortClause(ctx context.Context, val interface{}
 			}
 			if strings.Contains(eru_utils.ReplaceUnderscoresWithDots(s), ".") {
 				return fmt.Sprint(" order by ", eru_utils.ReplaceUnderscoresWithDots(s), isDesc)
+			} else if expr, isDerived := resolveDerivedName(sqlObj.resolveDerived, s); isDerived {
+				return fmt.Sprint(" order by ", expr, isDesc)
 			} else {
 				return fmt.Sprint(" order by ", sqlObj.MainTableName, ".", s, isDesc)
 			}
@@ -834,7 +882,7 @@ func (sqlObj *SQLObjectQ) processJoins(ctx context.Context, val []*OrderedMap) (
 							logs.WithContext(ctx).Warn("valid values for joinType are LEFT RIGHT and INNER ")
 						}
 					} else if vv.String() == "on" {
-						oc, _ := processWhereClause(ctx, reflect.ValueOf(v).MapIndex(vv).Interface(), "", sqlObj.MainTableName, true, false)
+						oc, _ := processWhereClause(ctx, reflect.ValueOf(v).MapIndex(vv).Interface(), "", sqlObj.MainTableName, true, false, nil)
 						onClause = oc
 					}
 				}
@@ -858,7 +906,7 @@ func (sqlObj *SQLObjectQ) MakeQuery(ctx context.Context, sqlMaker ds.SqlMakerI, 
 		strColums = strings.Join(sqlObj.Columns.ColNames, " , ")
 	}
 	strJoinClause := sqlObj.processJoins(ctx, sqlObj.JoinClause)
-	strWhereClause, e := processWhereClause(ctx, sqlObj.WhereClause, "", sqlObj.MainTableName, false, false)
+	strWhereClause, e := processWhereClause(ctx, sqlObj.WhereClause, "", sqlObj.MainTableName, false, false, sqlObj.resolveDerived)
 	if e != "" {
 		err = errors.New(e)
 	}
@@ -898,6 +946,11 @@ func (sqlObj *SQLObjectQ) MakeQuery(ctx context.Context, sqlMaker ds.SqlMakerI, 
 	if sqlObj.WithQuery != "" {
 		fromTable = fmt.Sprint("( ", sqlObj.WithQuery, " ) ", sqlObj.MainTableName)
 	}
+	// a derived field named in where or sort is compiled while those clauses are
+	// walked, and the walkers cannot carry an error out
+	if sqlObj.derivedErr != "" {
+		return errors.New(sqlObj.derivedErr)
+	}
 	sqlObj.DBQuery = fmt.Sprint(withClause, "select ", strDistinct, strColums, " from ", fromTable, " ", strJoinClause, " ", strWhereClause, " ", strGroupClause, strSortClause)
 
 	if !sqlObj.GroupByMode || sqlObj.Limit > 0 || sqlObj.Skip > 0 {
@@ -917,4 +970,33 @@ func (sqlObj *SQLObjectQ) MakeQuery(ctx context.Context, sqlMaker ds.SqlMakerI, 
 	sqlObj.DBQuery = strings.Replace(sqlObj.DBQuery, module_model.MAKE_JSON_ARRAY_FN, makeJsonArrayFnKeyWord, -1)
 
 	return err
+}
+
+// resolveDerivedName substitutes a derived field's compiled expression for a
+// bare column name in a WHERE or ORDER BY clause.
+func resolveDerivedName(resolve derivedExprResolver, name string) (string, bool) {
+	if resolve == nil || name == "" {
+		return "", false
+	}
+	return resolve(name)
+}
+
+func unqualifiedTableName(tableName string) string {
+	if i := strings.LastIndex(tableName, "."); i >= 0 {
+		return tableName[i+1:]
+	}
+	return tableName
+}
+
+// qualifyTableKey returns the schema-qualified key a table is stored under in
+// SchemaTables and DerivedFields.
+func qualifyTableKey(colTableName string, tableName string, sqlMaker ds.SqlMakerI) string {
+	key := colTableName
+	if key == "" {
+		key = tableName
+	}
+	if !strings.Contains(key, ".") {
+		key = fmt.Sprint(sqlMaker.DefaultSchemaName(), key)
+	}
+	return key
 }

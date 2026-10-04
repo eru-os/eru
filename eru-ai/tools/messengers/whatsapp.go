@@ -99,11 +99,11 @@ type WhatsAppAccount struct {
 	PhoneNumberId            string `json:"phone_number_id" eru:"required"`
 	BusinessAccountId        string `json:"business_account_id"`
 	AppId                    string `json:"app_id"`
-	ApiKey                   string `json:"api_key" eru:"required"`
+	ApiKey                   string `json:"api_key" secret:"true" eru:"required"`
 	WebhookUrl               string `json:"webhook_url"`
 	ApiVersion               string `json:"api_version"`
-	PrivateKey               string `json:"private_key"`
-	WebhookSubscriptionToken string `json:"webhook_subscription_token"`
+	PrivateKey               string `json:"private_key" secret:"true"`
+	WebhookSubscriptionToken string `json:"webhook_subscription_token" secret:"true"`
 }
 
 func (whatsAppTool *WhatsAppTool) GetActionsList() []tools.ActionInfo {
@@ -2242,7 +2242,7 @@ func init() {
 	tools.RegisterTool("WHATSAPP", func() tools.Tooling { return new(WhatsAppTool) })
 	tools.RegisterToolCatalog(tools.ToolCatalogEntry{
 		Public:       true,
-		ToolType:     "WhatsApp",
+		ToolType:     "WHATSAPP",
 		Category:     "Communication",
 		Description:  "WhatsApp Business API for messaging, media, templates, and webhooks",
 		Actions:      []tools.ActionInfo{{Name: SendMessage}, {Name: SubscribeWebhooks}, {Name: GetMessageStatus}, {Name: UploadMedia}, {Name: RetrieveMedia}, {Name: DeleteMedia}, {Name: GetMediaUrl}, {Name: GetBusinessProfile}, {Name: GetMessageTemplates}, {Name: MarkMessageAsRead}, {Name: SendTypingIndicator}, {Name: GetThroughput}, {Name: CreateGroup}, {Name: RegisterPublicKey}, {Name: FetchPublicKey}, {Name: FlowEndpoint}, {Name: SaveMessageTemplate}, {Name: DownloadFlowDocument}, {Name: FetchTemplates}, {Name: DeleteMessageTemplate}, {Name: Callback}},

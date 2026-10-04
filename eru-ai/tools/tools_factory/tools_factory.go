@@ -5,6 +5,7 @@ import (
 	_ "github.com/eru-os/eru/eru-ai/tools/analytics"
 	_ "github.com/eru-os/eru/eru-ai/tools/ecomm"
 	_ "github.com/eru-os/eru/eru-ai/tools/emails"
+	_ "github.com/eru-os/eru/eru-ai/tools/forex"
 	_ "github.com/eru-os/eru/eru-ai/tools/messengers"
 	_ "github.com/eru-os/eru/eru-ai/tools/repositories"
 	_ "github.com/eru-os/eru/eru-ai/tools/saas"

@@ -8,6 +8,7 @@ import (
 
 	logs "github.com/eru-os/eru/eru-logs/eru-logs"
 	"github.com/eru-os/eru/eru-ql/module_model"
+  "github.com/eru-os/eru/eru-ql/derived"
 )
 
 type MssqlSqlMaker struct {
@@ -134,3 +135,7 @@ func (mr *MssqlSqlMaker) getErutoDBDataTypeMapping(ctx context.Context, dataType
 
 var mssqlTableMetaDataSQL = ""
 var mssqlDataTypeMapping = map[string]string{}
+
+func (mr *MssqlSqlMaker) GetCalcDialect(ctx context.Context) derived.Dialect {
+	return derived.MssqlDialect()
+}

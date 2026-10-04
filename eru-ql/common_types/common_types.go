@@ -54,3 +54,67 @@ type TableStructure struct {
 	DroppedColumns  []string                     `json:"dropped_columns"`
 	ModifiedColumns map[string]ColumnChange      `json:"modified_columns"`
 }
+
+const (
+	ColumnMaskingNone    = "none"
+	ColumnMaskingEncrypt = "encrypt"
+	ColumnMaskingHash    = "hash"
+)
+
+const (
+	CalcModeVirtual = "virtual"
+	CalcModeStored  = "stored"
+)
+
+const (
+	CalcTypeNumber  = "number"
+	CalcTypeText    = "text"
+	CalcTypeDate    = "date"
+	CalcTypeBoolean = "boolean"
+)
+
+type CalcNode struct {
+	Kind     string      `json:"kind"`
+	Value    interface{} `json:"value,omitempty"`
+	Path     string      `json:"path,omitempty"`
+	Op       string      `json:"op,omitempty"`
+	Name     string      `json:"name,omitempty"`
+	Operand  *CalcNode   `json:"operand,omitempty"`
+	Left     *CalcNode   `json:"left,omitempty"`
+	Right    *CalcNode   `json:"right,omitempty"`
+	Args     []*CalcNode `json:"args,omitempty"`
+	StartPos int         `json:"start"`
+	EndPos   int         `json:"end"`
+}
+
+type CalcJoin struct {
+	TargetTable string   `json:"target_table"`
+	OwnCols     []string `json:"own_cols"`
+	TargetCols  []string `json:"target_cols"`
+	Cardinality string   `json:"cardinality"`
+}
+
+type DerivedFieldMetaData struct {
+	TblSchema        string        `json:"tbl_schema"`
+	TblName          string        `json:"tbl_name"`
+	ColName          string        `json:"col_name" eru:"required"`
+	DataType         string        `json:"data_type"`
+	OwnDataType      string        `json:"own_data_type"`
+	IsNullable       bool          `json:"is_nullable"`
+	ColPosition      int           `json:"col_position"`
+	NumericPrecision string        `json:"numeric_precision"`
+	NumericScale     int           `json:"numeric_scale"`
+	ColumnMasking    ColumnMasking `json:"column_masking"`
+
+	IsCalc           bool       `json:"is_calc"`
+	CalcMode         string     `json:"calc_mode"`
+	Formula          string     `json:"formula" eru:"required"`
+	CalcAST          *CalcNode  `json:"calc_ast"`
+	CalcDeps         []string   `json:"calc_deps"`
+	CalcRefs         []string   `json:"calc_refs"`
+	CalcJoins        []CalcJoin `json:"calc_joins"`
+	CalcHasAggregate bool       `json:"calc_has_aggregate"`
+	CalcResultType   string     `json:"calc_result_type"`
+	Invalid          bool       `json:"invalid"`
+	InvalidReason    string     `json:"invalid_reason"`
+}

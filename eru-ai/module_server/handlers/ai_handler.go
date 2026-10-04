@@ -217,14 +217,43 @@ func ToolListHandler(sh *module_store.StoreHolder) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 			return
 		}
+		prj, err := sh.Store.GetProjectConfig(r.Context(), projectID)
+		if err != nil {
+			server_handlers.FormatResponse(w, 400)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		// The stored config, not GetTool's clone: the clone has $SECRET_ placeholders
+		// already replaced with secret values, and this list goes to the browser.
+		lookup := []string{projectID}
+		if tenantID != "" {
+			lookup = utils.TenantLookupOrder(r.Context(), tenantID, projectID)
+		}
 		toolList := make([]interface{}, 0, len(names))
 		for _, name := range names {
-			tool, err := sh.Store.GetTool(r.Context(), projectID, tenantID, name, "", sh.Store)
-			if err != nil {
-				logs.WithContext(r.Context()).Error(fmt.Sprintf("GetTool %s: %v", name, err))
+			var stored tools.Tooling
+			for _, tid := range lookup {
+				if tenant, ok := prj.Tenants[tid]; ok {
+					if t, ok := tenant.Tools[name]; ok {
+						stored = t
+						break
+					}
+				}
+			}
+			if stored == nil {
 				continue
 			}
-			toolList = append(toolList, tool.GetSpec())
+			raw, mErr := json.Marshal(stored.GetSpec())
+			if mErr != nil {
+				logs.WithContext(r.Context()).Error(fmt.Sprintf("tool %s: %v", name, mErr))
+				continue
+			}
+			var spec map[string]interface{}
+			if uErr := json.Unmarshal(raw, &spec); uErr != nil {
+				logs.WithContext(r.Context()).Error(fmt.Sprintf("tool %s: %v", name, uErr))
+				continue
+			}
+			toolList = append(toolList, spec)
 		}
 		server_handlers.FormatResponse(w, 200)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"tools": toolList})

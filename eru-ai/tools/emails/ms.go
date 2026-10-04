@@ -770,7 +770,7 @@ func init() {
 	tools.RegisterTool("MS_EMAIL", func() tools.Tooling { return new(MsEmailTool) })
 	tools.RegisterToolCatalog(tools.ToolCatalogEntry{
 		Public:       true,
-		ToolType:     "MsEmail",
+		ToolType:     "MS_EMAIL",
 		Category:     "Communication",
 		Description:  "Microsoft email integration for reading, sending, and subscribing to emails via Microsoft Graph API",
 		Actions:      []tools.ActionInfo{{Name: ReadEmail}, {Name: SendEmail}, {Name: SubscribeEmail}, {Name: ReadMessage}, {Name: GetSsoUrl}, {Name: Login}, {Name: RenewToken}, {Name: RenewSubscription}},

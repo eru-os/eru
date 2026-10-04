@@ -1383,6 +1383,16 @@ func StructToJSONSchema(t reflect.Type, seenFields []string) eru_models.JSONSche
 			fieldSchema.Format = format
 		}
 
+		// A `secret:"true"` field holds a credential. Its value is a
+		// $SECRET_<name> reference, never the secret itself, and it is never
+		// returned once saved.
+		if field.Tag.Get("secret") == "true" {
+			fieldSchema.WriteOnly = true
+			if fieldSchema.Format == "" {
+				fieldSchema.Format = "password"
+			}
+		}
+
 		// Add the allowed values from an `enum:"a,b,c"` tag.
 		//
 		// Worth the tag rather than prose in `desc`: the enum travels into the
